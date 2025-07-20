@@ -16,7 +16,7 @@ type VertexAIClaudeRequest struct {
 	TopK             int                 `json:"top_k,omitempty"`
 	Tools            any                 `json:"tools,omitempty"`
 	ToolChoice       any                 `json:"tool_choice,omitempty"`
-	Thinking         *dto.Thinking       `json:"thinking,omitempty"`
+	Thinking         *dto.Thinking `json:"thinking,omitempty"`
 }
 
 func copyRequest(req *dto.ClaudeRequest, version string) *VertexAIClaudeRequest {
@@ -24,7 +24,7 @@ func copyRequest(req *dto.ClaudeRequest, version string) *VertexAIClaudeRequest 
 		AnthropicVersion: version,
 		System:           req.System,
 		Messages:         req.Messages,
-		MaxTokens:        req.MaxTokens,
+		MaxTokens:        uint(req.MaxTokens),
 		Stream:           req.Stream,
 		Temperature:      req.Temperature,
 		TopP:             req.TopP,

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:deepwiki.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(mkdir:*)",
+      "Bash(go build:*)",
+      "Bash(git checkout:*)",
+      "Bash(rm:*)"
+    ],
+    "deny": []
+  }
+}
