@@ -14,8 +14,8 @@ import (
 func ClaudeToOpenAIRequest(claudeRequest dto.ClaudeRequest, info *relaycommon.RelayInfo) (*dto.GeneralOpenAIRequest, error) {
 	openAIRequest := dto.GeneralOpenAIRequest{
 		Model:       claudeRequest.Model,
-		MaxTokens:   claudeRequest.MaxTokens,
-		Temperature: claudeRequest.Temperature,
+		MaxTokens:   uint(claudeRequest.MaxTokens),
+		Temperature: &claudeRequest.Temperature,
 		TopP:        claudeRequest.TopP,
 		Stream:      claudeRequest.Stream,
 	}
@@ -68,7 +68,7 @@ func ClaudeToOpenAIRequest(claudeRequest dto.ClaudeRequest, info *relaycommon.Re
 	openAIMessages := make([]dto.Message, 0)
 
 	// Add system message if present
-	if claudeRequest.System != nil {
+	if claudeRequest.System != nil && claudeRequest.System != "" {
 		if claudeRequest.IsStringSystem() && claudeRequest.GetStringSystem() != "" {
 			openAIMessage := dto.Message{
 				Role: "system",
@@ -85,11 +85,16 @@ func ClaudeToOpenAIRequest(claudeRequest dto.ClaudeRequest, info *relaycommon.Re
 				if isOpenRouterClaude {
 					systemMediaMessages := make([]dto.MediaContent, 0, len(systems))
 					for _, system := range systems {
-						message := dto.MediaContent{
-							Type:         "text",
-							Text:         system.GetText(),
-							CacheControl: system.CacheControl,
-						}
+						var cacheControl json.RawMessage
+					if system.CacheControl != nil {
+						cacheControlBytes, _ := json.Marshal(system.CacheControl)
+						cacheControl = cacheControlBytes
+					}
+					message := dto.MediaContent{
+						Type:         "text",
+						Text:         system.GetText(),
+						CacheControl: cacheControl,
+					}
 						systemMediaMessages = append(systemMediaMessages, message)
 					}
 					openAIMessage.SetMediaContent(systemMediaMessages)
@@ -126,10 +131,15 @@ func ClaudeToOpenAIRequest(claudeRequest dto.ClaudeRequest, info *relaycommon.Re
 			for _, mediaMsg := range contents {
 				switch mediaMsg.Type {
 				case "text":
+					var cacheControl json.RawMessage
+					if mediaMsg.CacheControl != nil {
+						cacheControlBytes, _ := json.Marshal(mediaMsg.CacheControl)
+						cacheControl = cacheControlBytes
+					}
 					message := dto.MediaContent{
 						Type:         "text",
 						Text:         mediaMsg.GetText(),
-						CacheControl: mediaMsg.CacheControl,
+						CacheControl: cacheControl,
 					}
 					mediaMessages = append(mediaMessages, message)
 				case "image":
@@ -162,7 +172,7 @@ func ClaudeToOpenAIRequest(claudeRequest dto.ClaudeRequest, info *relaycommon.Re
 					if mediaMsg.IsStringContent() {
 						oaiToolMessage.SetStringContent(mediaMsg.GetStringContent())
 					} else {
-						mediaContents := mediaMsg.ParseMediaContent()
+						mediaContents, _ := mediaMsg.ParseMediaContent()
 						encodeJson, _ := common.EncodeJson(mediaContents)
 						oaiToolMessage.SetStringContent(string(encodeJson))
 					}
@@ -235,7 +245,6 @@ func StreamResponseOpenAI2Claude(openAIResponse *dto.ChatCompletionsStreamRespon
 			Type:    "message_start",
 			Message: msg,
 		})
-		claudeResponses = append(claudeResponses)
 		//claudeResponses = append(claudeResponses, &dto.ClaudeResponse{
 		//	Type: "ping",
 		//})
@@ -288,8 +297,8 @@ func StreamResponseOpenAI2Claude(openAIResponse *dto.ChatCompletionsStreamRespon
 						CacheReadInputTokens:     oaiUsage.PromptTokensDetails.CachedTokens,
 					},
 					Delta: &dto.ClaudeMediaMessage{
-						StopReason: common.GetPointer[string](stopReasonOpenAI2Claude(info.FinishReason)),
-					},
+					StopReason: stopReasonOpenAI2Claude(info.FinishReason),
+				},
 				})
 			}
 			claudeResponses = append(claudeResponses, &dto.ClaudeResponse{

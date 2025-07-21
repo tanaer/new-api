@@ -34,32 +34,21 @@ func stopReasonClaude2OpenAI(reason string) string {
 
 func RequestOpenAI2ClaudeComplete(textRequest dto.GeneralOpenAIRequest) *dto.ClaudeRequest {
 
+	var temperature float64
+	if textRequest.Temperature != nil {
+		temperature = *textRequest.Temperature
+	}
 	claudeRequest := dto.ClaudeRequest{
 		Model:         textRequest.Model,
-		Prompt:        "",
 		StopSequences: nil,
-		Temperature:   textRequest.Temperature,
+		Temperature:   temperature,
 		TopP:          textRequest.TopP,
 		TopK:          textRequest.TopK,
 		Stream:        textRequest.Stream,
 	}
-	if claudeRequest.MaxTokensToSample == 0 {
-		claudeRequest.MaxTokensToSample = 4096
+	if claudeRequest.MaxTokens == 0 {
+		claudeRequest.MaxTokens = 4096
 	}
-	prompt := ""
-	for _, message := range textRequest.Messages {
-		if message.Role == "user" {
-			prompt += fmt.Sprintf("\n\nHuman: %s", message.StringContent())
-		} else if message.Role == "assistant" {
-			prompt += fmt.Sprintf("\n\nAssistant: %s", message.StringContent())
-		} else if message.Role == "system" {
-			if prompt == "" {
-				prompt = message.StringContent()
-			}
-		}
-	}
-	prompt += "\n\nAssistant:"
-	claudeRequest.Prompt = prompt
 	return &claudeRequest
 }
 
@@ -72,27 +61,33 @@ func RequestOpenAI2ClaudeMessage(textRequest dto.GeneralOpenAIRequest) (*dto.Cla
 				Name:        tool.Function.Name,
 				Description: tool.Function.Description,
 			}
-			claudeTool.InputSchema = make(map[string]interface{})
+			schema := make(map[string]interface{})
 			if params["type"] != nil {
-				claudeTool.InputSchema["type"] = params["type"].(string)
+				schema["type"] = params["type"].(string)
 			}
-			claudeTool.InputSchema["properties"] = params["properties"]
-			claudeTool.InputSchema["required"] = params["required"]
+			schema["properties"] = params["properties"]
+			schema["required"] = params["required"]
 			for s, a := range params {
 				if s == "type" || s == "properties" || s == "required" {
 					continue
 				}
-				claudeTool.InputSchema[s] = a
+				schema[s] = a
 			}
+			claudeTool.InputSchema = schema
 			claudeTools = append(claudeTools, claudeTool)
 		}
 	}
 
+	var temperature float64
+	if textRequest.Temperature != nil {
+		temperature = *textRequest.Temperature
+	}
+
 	claudeRequest := dto.ClaudeRequest{
 		Model:         textRequest.Model,
-		MaxTokens:     textRequest.MaxTokens,
+		MaxTokens:     int(textRequest.MaxTokens),
 		StopSequences: nil,
-		Temperature:   textRequest.Temperature,
+		Temperature:   temperature,
 		TopP:          textRequest.TopP,
 		TopK:          textRequest.TopK,
 		Stream:        textRequest.Stream,
@@ -100,7 +95,7 @@ func RequestOpenAI2ClaudeMessage(textRequest dto.GeneralOpenAIRequest) (*dto.Cla
 	}
 
 	if claudeRequest.MaxTokens == 0 {
-		claudeRequest.MaxTokens = uint(model_setting.GetClaudeSettings().GetDefaultMaxTokens(textRequest.Model))
+		claudeRequest.MaxTokens = model_setting.GetClaudeSettings().GetDefaultMaxTokens(textRequest.Model)
 	}
 
 	if model_setting.GetClaudeSettings().ThinkingAdapterEnabled &&
@@ -112,14 +107,13 @@ func RequestOpenAI2ClaudeMessage(textRequest dto.GeneralOpenAIRequest) (*dto.Cla
 		}
 
 		// BudgetTokens 为 max_tokens 的 80%
-		claudeRequest.Thinking = &dto.Thinking{
-			Type:         "enabled",
-			BudgetTokens: common.GetPointer[int](int(float64(claudeRequest.MaxTokens) * model_setting.GetClaudeSettings().ThinkingAdapterBudgetTokensPercentage)),
+		claudeRequest.Thinking = &dto.ClaudeThinking{
+			Type: "enabled",
 		}
 		// TODO: 临时处理
 		// https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#important-considerations-when-using-extended-thinking
 		claudeRequest.TopP = 0
-		claudeRequest.Temperature = common.GetPointer[float64](1.0)
+		claudeRequest.Temperature = 1.0
 		claudeRequest.Model = strings.TrimSuffix(textRequest.Model, "-thinking")
 	}
 
@@ -131,9 +125,8 @@ func RequestOpenAI2ClaudeMessage(textRequest dto.GeneralOpenAIRequest) (*dto.Cla
 
 		budgetTokens := reasoning.MaxTokens
 		if budgetTokens > 0 {
-			claudeRequest.Thinking = &dto.Thinking{
-				Type:         "enabled",
-				BudgetTokens: &budgetTokens,
+			claudeRequest.Thinking = &dto.ClaudeThinking{
+				Type: "enabled",
 			}
 		}
 	}
@@ -205,14 +198,14 @@ func RequestOpenAI2ClaudeMessage(textRequest dto.GeneralOpenAIRequest) (*dto.Cla
 				if message.Role != "user" {
 					// fix: first message is assistant, add user message
 					claudeMessage := dto.ClaudeMessage{
-						Role: "user",
-						Content: []dto.ClaudeMediaMessage{
-							{
-								Type: "text",
-								Text: common.GetPointer[string]("..."),
-							},
+					Role: "user",
+					Content: []dto.ClaudeContent{
+						{
+							Type: "text",
+							Text: "...",
 						},
-					}
+					},
+				}
 					claudeMessages = append(claudeMessages, claudeMessage)
 				}
 			}
@@ -221,46 +214,46 @@ func RequestOpenAI2ClaudeMessage(textRequest dto.GeneralOpenAIRequest) (*dto.Cla
 			}
 			if message.Role == "tool" {
 				if len(claudeMessages) > 0 && claudeMessages[len(claudeMessages)-1].Role == "user" {
-					lastMessage := claudeMessages[len(claudeMessages)-1]
-					if content, ok := lastMessage.Content.(string); ok {
-						lastMessage.Content = []dto.ClaudeMediaMessage{
-							{
-								Type: "text",
-								Text: common.GetPointer[string](content),
-							},
-						}
+					lastMessage := &claudeMessages[len(claudeMessages)-1]
+					if len(lastMessage.Content) > 0 {
+						// Content is already []dto.ClaudeContent, no need to convert
 					}
-					lastMessage.Content = append(lastMessage.Content.([]dto.ClaudeMediaMessage), dto.ClaudeMediaMessage{
+					lastMessage.Content = append(lastMessage.Content, dto.ClaudeContent{
 						Type:      "tool_result",
 						ToolUseId: message.ToolCallId,
-						Content:   message.Content,
+						Content:   message.Content.(string),
 					})
-					claudeMessages[len(claudeMessages)-1] = lastMessage
+					claudeMessages[len(claudeMessages)-1] = *lastMessage
 					continue
 				} else {
 					claudeMessage.Role = "user"
-					claudeMessage.Content = []dto.ClaudeMediaMessage{
+					claudeMessage.Content = []dto.ClaudeContent{
 						{
 							Type:      "tool_result",
 							ToolUseId: message.ToolCallId,
-							Content:   message.Content,
+							Content:   message.Content.(string),
 						},
 					}
 				}
 			} else if message.IsStringContent() && message.ToolCalls == nil {
-				claudeMessage.Content = message.StringContent()
+				claudeMessage.Content = []dto.ClaudeContent{
+					{
+						Type: "text",
+						Text: message.StringContent(),
+					},
+				}
 			} else {
-				claudeMediaMessages := make([]dto.ClaudeMediaMessage, 0)
+				claudeContents := make([]dto.ClaudeContent, 0)
 				for _, mediaMessage := range message.ParseContent() {
-					claudeMediaMessage := dto.ClaudeMediaMessage{
+					claudeContent := dto.ClaudeContent{
 						Type: mediaMessage.Type,
 					}
 					if mediaMessage.Type == "text" {
-						claudeMediaMessage.Text = common.GetPointer[string](mediaMessage.Text)
+						claudeContent.Text = mediaMessage.Text
 					} else {
 						imageUrl := mediaMessage.GetImageMedia()
-						claudeMediaMessage.Type = "image"
-						claudeMediaMessage.Source = &dto.ClaudeMessageSource{
+						claudeContent.Type = "image"
+						claudeContent.Source = &dto.ClaudeToolSource{
 							Type: "base64",
 						}
 						// 判断是否是url
@@ -270,18 +263,18 @@ func RequestOpenAI2ClaudeMessage(textRequest dto.GeneralOpenAIRequest) (*dto.Cla
 							if err != nil {
 								return nil, fmt.Errorf("get file base64 from url failed: %s", err.Error())
 							}
-							claudeMediaMessage.Source.MediaType = fileData.MimeType
-							claudeMediaMessage.Source.Data = fileData.Base64Data
+							claudeContent.Source.MediaType = fileData.MimeType
+							claudeContent.Source.Data = fileData.Base64Data
 						} else {
 							_, format, base64String, err := service.DecodeBase64ImageData(imageUrl.Url)
 							if err != nil {
 								return nil, err
 							}
-							claudeMediaMessage.Source.MediaType = "image/" + format
-							claudeMediaMessage.Source.Data = base64String
+							claudeContent.Source.MediaType = "image/" + format
+							claudeContent.Source.Data = base64String
 						}
 					}
-					claudeMediaMessages = append(claudeMediaMessages, claudeMediaMessage)
+					claudeContents = append(claudeContents, claudeContent)
 				}
 				if message.ToolCalls != nil {
 					for _, toolCall := range message.ParseToolCalls() {
@@ -290,7 +283,7 @@ func RequestOpenAI2ClaudeMessage(textRequest dto.GeneralOpenAIRequest) (*dto.Cla
 							common.SysError("tool call function arguments is not a map[string]any: " + fmt.Sprintf("%v", toolCall.Function.Arguments))
 							continue
 						}
-						claudeMediaMessages = append(claudeMediaMessages, dto.ClaudeMediaMessage{
+						claudeContents = append(claudeContents, dto.ClaudeContent{
 							Type:  "tool_use",
 							Id:    toolCall.ID,
 							Name:  toolCall.Function.Name,
@@ -298,12 +291,11 @@ func RequestOpenAI2ClaudeMessage(textRequest dto.GeneralOpenAIRequest) (*dto.Cla
 						})
 					}
 				}
-				claudeMessage.Content = claudeMediaMessages
+				claudeMessage.Content = claudeContents
 			}
 			claudeMessages = append(claudeMessages, claudeMessage)
 		}
 	}
-	claudeRequest.Prompt = ""
 	claudeRequest.Messages = claudeMessages
 	return &claudeRequest, nil
 }
@@ -361,7 +353,7 @@ func StreamResponseClaude2OpenAI(reqMode int, claudeResponse *dto.ClaudeResponse
 						Type:  "function",
 						Index: common.GetPointer(fcIdx),
 						Function: dto.FunctionResponse{
-							Arguments: *claudeResponse.Delta.PartialJson,
+							Arguments: claudeResponse.Delta.PartialJson,
 						},
 					})
 				case "signature_delta":

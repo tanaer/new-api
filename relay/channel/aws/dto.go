@@ -16,7 +16,7 @@ type AwsClaudeRequest struct {
 	StopSequences    []string            `json:"stop_sequences,omitempty"`
 	Tools            any                 `json:"tools,omitempty"`
 	ToolChoice       any                 `json:"tool_choice,omitempty"`
-	Thinking         *dto.Thinking `json:"thinking,omitempty"`
+	Thinking         *dto.Thinking       `json:"thinking,omitempty"`
 }
 
 func copyRequest(req *dto.ClaudeRequest) *AwsClaudeRequest {
