@@ -9,13 +9,13 @@ import (
 	"one-api/relay/channel/baidu"
 	"one-api/relay/channel/baidu_v2"
 	"one-api/relay/channel/claude"
-	"one-api/relay/channel/claudecode"
 	"one-api/relay/channel/cloudflare"
 	"one-api/relay/channel/cohere"
 	"one-api/relay/channel/coze"
 	"one-api/relay/channel/deepseek"
 	"one-api/relay/channel/dify"
 	"one-api/relay/channel/gemini"
+	"one-api/relay/channel/jimeng"
 	"one-api/relay/channel/jina"
 	"one-api/relay/channel/mistral"
 	"one-api/relay/channel/mokaai"
@@ -24,7 +24,7 @@ import (
 	"one-api/relay/channel/palm"
 	"one-api/relay/channel/perplexity"
 	"one-api/relay/channel/siliconflow"
-	"one-api/relay/channel/task/jimeng"
+	taskjimeng "one-api/relay/channel/task/jimeng"
 	"one-api/relay/channel/task/kling"
 	"one-api/relay/channel/task/suno"
 	"one-api/relay/channel/tencent"
@@ -94,8 +94,8 @@ func GetAdaptor(apiType int) channel.Adaptor {
 		return &xai.Adaptor{}
 	case constant.APITypeCoze:
 		return &coze.Adaptor{}
-	case constant.APITypeClaudeCode:
-		return &claudecode.Adaptor{}
+	case constant.APITypeJimeng:
+		return &jimeng.Adaptor{}
 	}
 	return nil
 }
@@ -109,7 +109,7 @@ func GetTaskAdaptor(platform commonconstant.TaskPlatform) channel.TaskAdaptor {
 	case commonconstant.TaskPlatformKling:
 		return &kling.TaskAdaptor{}
 	case commonconstant.TaskPlatformJimeng:
-		return &jimeng.TaskAdaptor{}
+		return &taskjimeng.TaskAdaptor{}
 	}
 	return nil
 }
