@@ -8,20 +8,9 @@ import {
     Button,
 } from '@douyinfe/semi-ui';
 import { IconRefresh } from '@douyinfe/semi-icons';
+import { API } from '../../helpers/api';
 
 const { Text, Paragraph } = Typography;
-
-async function apiFetch(url, options = {}) {
-    const res = await fetch(url, {
-        ...options,
-        headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${localStorage.getItem('token')}`,
-            ...options.headers,
-        },
-    });
-    return res.json();
-}
 
 const SyncLogPage = () => {
     const [logs, setLogs] = useState([]);
@@ -35,15 +24,15 @@ const SyncLogPage = () => {
     const loadLogs = useCallback(async () => {
         setLoading(true);
         try {
-            const params = new URLSearchParams({
-                p: String(page - 1),
-                page_size: String(pageSize),
-            });
-            if (filterSupplier > 0) params.set('supplier_id', String(filterSupplier));
-            const data = await apiFetch(`/api/supplier/sync_logs?${params}`);
-            if (data.success) {
-                setLogs(data.data || []);
-                setTotal(data.total || 0);
+            const params = {
+                p: page - 1,
+                page_size: pageSize,
+            };
+            if (filterSupplier > 0) params.supplier_id = filterSupplier;
+            const res = await API.get('/api/supplier/sync_logs', { params });
+            if (res.data.success) {
+                setLogs(res.data.data || []);
+                setTotal(res.data.total || 0);
             }
         } finally {
             setLoading(false);
@@ -51,8 +40,8 @@ const SyncLogPage = () => {
     }, [page, pageSize, filterSupplier]);
 
     const loadSuppliers = useCallback(async () => {
-        const data = await apiFetch('/api/supplier/');
-        if (data.success) setSuppliers(data.data || []);
+        const res = await API.get('/api/supplier/');
+        if (res.data.success) setSuppliers(res.data.data || []);
     }, []);
 
     useEffect(() => { loadSuppliers(); }, [loadSuppliers]);

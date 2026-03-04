@@ -7,20 +7,9 @@ import {
     Space,
     Banner,
 } from '@douyinfe/semi-ui';
+import { API } from '../../helpers/api';
 
 const { Text, Title } = Typography;
-
-async function apiFetch(url, options = {}) {
-    const res = await fetch(url, {
-        ...options,
-        headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${localStorage.getItem('token')}`,
-            ...options.headers,
-        },
-    });
-    return res.json();
-}
 
 const NotificationSetting = () => {
     const [config, setConfig] = useState({
@@ -36,24 +25,25 @@ const NotificationSetting = () => {
     }, []);
 
     const loadConfig = async () => {
-        const data = await apiFetch('/api/notification/config');
-        if (data.success && data.data) {
-            setConfig(data.data);
+        try {
+            const res = await API.get('/api/notification/config');
+            if (res.data.success && res.data.data) {
+                setConfig(res.data.data);
+            }
+        } catch (e) {
+            // ignore
         }
     };
 
     const saveConfig = async (values) => {
         setLoading(true);
         try {
-            const data = await apiFetch('/api/notification/config', {
-                method: 'PUT',
-                body: JSON.stringify({ ...config, ...values }),
-            });
-            if (data.success) {
-                Toast.success(data.message);
+            const res = await API.put('/api/notification/config', { ...config, ...values });
+            if (res.data.success) {
+                Toast.success(res.data.message);
                 loadConfig();
             } else {
-                Toast.error(data.message);
+                Toast.error(res.data.message);
             }
         } finally {
             setLoading(false);
@@ -63,14 +53,11 @@ const NotificationSetting = () => {
     const testNotification = async () => {
         setTestLoading(true);
         try {
-            const data = await apiFetch('/api/notification/test', {
-                method: 'POST',
-                body: JSON.stringify({ token: config.token }),
-            });
-            if (data.success) {
-                Toast.success(data.message);
+            const res = await API.post('/api/notification/test', { token: config.token });
+            if (res.data.success) {
+                Toast.success(res.data.message);
             } else {
-                Toast.error(data.message);
+                Toast.error(res.data.message);
             }
         } finally {
             setTestLoading(false);

@@ -25,22 +25,11 @@ import {
     IconSetting,
     IconSearch,
 } from '@douyinfe/semi-icons';
+import { API } from '../../helpers/api';
 
 const { Text } = Typography;
 
 const API_BASE = '/api/supplier';
-
-async function apiFetch(url, options = {}) {
-    const res = await fetch(url, {
-        ...options,
-        headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${localStorage.getItem('token')}`,
-            ...options.headers,
-        },
-    });
-    return res.json();
-}
 
 const SupplierPage = () => {
     const [suppliers, setSuppliers] = useState([]);
@@ -59,8 +48,8 @@ const SupplierPage = () => {
     const loadSuppliers = useCallback(async () => {
         setLoading(true);
         try {
-            const data = await apiFetch(`${API_BASE}/`);
-            if (data.success) setSuppliers(data.data || []);
+            const res = await API.get(`${API_BASE}/`);
+            if (res.data.success) setSuppliers(res.data.data || []);
         } finally {
             setLoading(false);
         }
@@ -69,9 +58,9 @@ const SupplierPage = () => {
     // 加载本地分组列表
     const loadExistingGroups = useCallback(async () => {
         try {
-            const data = await apiFetch('/api/group/');
-            if (data.success) {
-                const groupNames = data.data || [];
+            const res = await API.get('/api/group/');
+            if (res.data.success) {
+                const groupNames = res.data.data || [];
                 setExistingGroups(
                     groupNames.map((g) => ({ label: g, value: g })),
                 );
@@ -97,27 +86,34 @@ const SupplierPage = () => {
     // 保存供应商
     const saveSupplier = async (values) => {
         const isNew = !editingSupplier?.id;
-        const url = isNew ? `${API_BASE}/` : `${API_BASE}/`;
-        const method = isNew ? 'POST' : 'PUT';
+        const method = isNew ? 'post' : 'put';
         const body = { ...editingSupplier, ...values };
-        const data = await apiFetch(url, { method, body: JSON.stringify(body) });
-        if (data.success) {
-            Toast.success(data.message);
-            setShowEdit(false);
-            loadSuppliers();
-        } else {
-            Toast.error(data.message);
+        try {
+            const res = await API[method](`${API_BASE}/`, body);
+            if (res.data.success) {
+                Toast.success(res.data.message);
+                setShowEdit(false);
+                loadSuppliers();
+            } else {
+                Toast.error(res.data.message);
+            }
+        } catch (e) {
+            Toast.error('请求失败');
         }
     };
 
     // 删除供应商
     const deleteSupplier = async (id) => {
-        const data = await apiFetch(`${API_BASE}/${id}`, { method: 'DELETE' });
-        if (data.success) {
-            Toast.success(data.message);
-            loadSuppliers();
-        } else {
-            Toast.error(data.message);
+        try {
+            const res = await API.delete(`${API_BASE}/${id}`);
+            if (res.data.success) {
+                Toast.success(res.data.message);
+                loadSuppliers();
+            } else {
+                Toast.error(res.data.message);
+            }
+        } catch (e) {
+            Toast.error('删除失败');
         }
     };
 
@@ -127,9 +123,9 @@ const SupplierPage = () => {
         setShowGroups(true);
         setGroupsLoading(true);
         try {
-            const data = await apiFetch(`${API_BASE}/${supplier.id}`);
-            if (data.success) {
-                setGroups(data.data.groups || []);
+            const res = await API.get(`${API_BASE}/${supplier.id}`);
+            if (res.data.success) {
+                setGroups(res.data.data.groups || []);
             }
         } finally {
             setGroupsLoading(false);
@@ -141,12 +137,12 @@ const SupplierPage = () => {
         if (!currentSupplier) return;
         setFetchingGroups(true);
         try {
-            const data = await apiFetch(`${API_BASE}/${currentSupplier.id}/fetch_groups`, { method: 'POST' });
-            if (data.success) {
-                Toast.success(data.message);
-                setGroups(data.data || []);
+            const res = await API.post(`${API_BASE}/${currentSupplier.id}/fetch_groups`);
+            if (res.data.success) {
+                Toast.success(res.data.message);
+                setGroups(res.data.data || []);
             } else {
-                Toast.error(data.message);
+                Toast.error(res.data.message);
             }
         } finally {
             setFetchingGroups(false);
@@ -155,53 +151,60 @@ const SupplierPage = () => {
 
     // 更新分组配置
     const updateGroup = async (group) => {
-        const data = await apiFetch(`${API_BASE}/group`, {
-            method: 'PUT',
-            body: JSON.stringify(group),
-        });
-        if (data.success) {
-            Toast.success('更新成功');
-        } else {
-            Toast.error(data.message);
+        try {
+            const res = await API.put(`${API_BASE}/group`, group);
+            if (res.data.success) {
+                Toast.success('更新成功');
+            } else {
+                Toast.error(res.data.message);
+            }
+        } catch (e) {
+            Toast.error('更新失败');
         }
     };
 
     // 修改单个供应商倍率
     const updateMarkup = async (supplierId, markup) => {
-        const data = await apiFetch(`${API_BASE}/${supplierId}/markup`, {
-            method: 'PUT',
-            body: JSON.stringify({ markup }),
-        });
-        if (data.success) {
-            Toast.success(data.message);
-            loadSuppliers();
-        } else {
-            Toast.error(data.message);
+        try {
+            const res = await API.put(`${API_BASE}/${supplierId}/markup`, { markup });
+            if (res.data.success) {
+                Toast.success(res.data.message);
+                loadSuppliers();
+            } else {
+                Toast.error(res.data.message);
+            }
+        } catch (e) {
+            Toast.error('更新失败');
         }
     };
 
     // 一键设置所有倍率
     const bulkUpdateMarkup = async () => {
-        const data = await apiFetch(`${API_BASE}/bulk_markup`, {
-            method: 'PUT',
-            body: JSON.stringify({ markup: bulkMarkup }),
-        });
-        if (data.success) {
-            Toast.success(data.message);
-            setBulkMarkupVisible(false);
-            loadSuppliers();
-        } else {
-            Toast.error(data.message);
+        try {
+            const res = await API.put(`${API_BASE}/bulk_markup`, { markup: bulkMarkup });
+            if (res.data.success) {
+                Toast.success(res.data.message);
+                setBulkMarkupVisible(false);
+                loadSuppliers();
+            } else {
+                Toast.error(res.data.message);
+            }
+        } catch (e) {
+            Toast.error('更新失败');
         }
     };
 
     // 查询余额
     const checkBalance = async (supplierId) => {
-        const data = await apiFetch(`${API_BASE}/${supplierId}/check_balance`, { method: 'POST' });
-        if (data.success) {
-            Toast.info(`余额信息: ${JSON.stringify(data.data)}`);
-        } else {
-            Toast.error(data.message);
+        try {
+            const res = await API.post(`${API_BASE}/${supplierId}/check_balance`);
+            if (res.data.success) {
+                Toast.info(`余额信息: ${JSON.stringify(res.data.data)}`);
+            } else {
+                Toast.error(res.data.message);
+            }
+        } catch (e) {
+            Toast.error('查询失败');
         }
     };
 
