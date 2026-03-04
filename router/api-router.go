@@ -199,6 +199,28 @@ func SetApiRouter(router *gin.Engine) {
 			ratioSyncRoute.GET("/channels", controller.GetSyncableChannels)
 			ratioSyncRoute.POST("/fetch", controller.FetchUpstreamRatios)
 		}
+		supplierRoute := apiRouter.Group("/supplier")
+		supplierRoute.Use(middleware.RootAuth())
+		{
+			supplierRoute.GET("/", controller.GetAllSuppliers)
+			supplierRoute.GET("/sync_logs", controller.GetSyncLogs)
+			supplierRoute.GET("/:id", controller.GetSupplier)
+			supplierRoute.POST("/", controller.CreateSupplier)
+			supplierRoute.PUT("/", controller.UpdateSupplier)
+			supplierRoute.DELETE("/:id", controller.DeleteSupplier)
+			supplierRoute.POST("/:id/fetch_groups", controller.FetchSupplierGroups)
+			supplierRoute.PUT("/:id/markup", controller.UpdateSupplierMarkup)
+			supplierRoute.PUT("/bulk_markup", controller.BulkUpdateMarkup)
+			supplierRoute.PUT("/group", controller.UpdateSupplierGroup)
+			supplierRoute.POST("/:id/check_balance", controller.CheckSupplierBalance)
+		}
+		notificationRoute := apiRouter.Group("/notification")
+		notificationRoute.Use(middleware.RootAuth())
+		{
+			notificationRoute.GET("/config", controller.GetNotificationConfig)
+			notificationRoute.PUT("/config", controller.UpdateNotificationConfig)
+			notificationRoute.POST("/test", controller.TestNotification)
+		}
 		channelRoute := apiRouter.Group("/channel")
 		channelRoute.Use(middleware.AdminAuth())
 		{

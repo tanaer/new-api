@@ -51,6 +51,8 @@ type Channel struct {
 	// add after v0.8.5
 	ChannelInfo ChannelInfo `json:"channel_info" gorm:"type:json"`
 
+	SupplierID int `json:"supplier_id" gorm:"default:0;index"` // 所属供应商ID，0=独立通道
+
 	OtherSettings string `json:"settings" gorm:"column:settings"` // 其他设置，存储azure版本等不需要检索的信息，详见dto.ChannelOtherSettings
 
 	// cache info
@@ -426,6 +428,13 @@ func (channel *Channel) GetBaseURL() string {
 	}
 	url := *channel.BaseURL
 	if url == "" {
+		// 如果通道有所属供应商，继承供应商的 BaseURL
+		if channel.SupplierID > 0 {
+			supplier, err := GetSupplierById(channel.SupplierID)
+			if err == nil && supplier.BaseURL != "" {
+				return supplier.BaseURL
+			}
+		}
 		url = constant.ChannelBaseURLs[channel.Type]
 	}
 	return url

@@ -49,9 +49,11 @@ const routerMap = {
   deployment: '/console/deployment',
   playground: '/console/playground',
   personal: '/console/personal',
+  supplier: '/console/supplier',
+  sync_log: '/console/supplier/sync_log',
 };
 
-const SiderBar = ({ onNavigate = () => {} }) => {
+const SiderBar = ({ onNavigate = () => { } }) => {
   const { t } = useTranslation();
   const [collapsed, toggleCollapsed] = useSidebarCollapsed();
   const {
@@ -187,6 +189,18 @@ const SiderBar = ({ onNavigate = () => {} }) => {
         text: t('系统设置'),
         itemKey: 'setting',
         to: '/setting',
+        className: isRoot() ? '' : 'tableHiddle',
+      },
+      {
+        text: t('供应商'),
+        itemKey: 'supplier',
+        to: '/supplier',
+        className: isRoot() ? '' : 'tableHiddle',
+      },
+      {
+        text: t('同步日志'),
+        itemKey: 'sync_log',
+        to: '/console/supplier/sync_log',
         className: isRoot() ? '' : 'tableHiddle',
       },
     ];
