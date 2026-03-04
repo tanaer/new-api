@@ -250,13 +250,32 @@ func detectGroupChanges(supplier *model.Supplier) (added []string, removed []str
 		return nil, nil
 	}
 
-	// 提取 usable_group
+	// 提取 usable_group（支持 object 和 array 两种格式）
 	upstreamGroups := make(map[string]bool)
 	if ug, ok := pricingResp["usable_group"]; ok {
-		if ugArr, ok := ug.([]interface{}); ok {
-			for _, g := range ugArr {
-				if gStr, ok := g.(string); ok {
+		switch ugTyped := ug.(type) {
+		case map[string]interface{}:
+			for groupName := range ugTyped {
+				if groupName != "" {
+					upstreamGroups[groupName] = true
+				}
+			}
+		case []interface{}:
+			for _, g := range ugTyped {
+				if gStr, ok := g.(string); ok && gStr != "" {
 					upstreamGroups[gStr] = true
+				}
+			}
+		}
+	}
+	// 如果 usable_group 为空，从 group_ratio 提取
+	if len(upstreamGroups) == 0 {
+		if gr, ok := pricingResp["group_ratio"]; ok {
+			if grMap, ok := gr.(map[string]interface{}); ok {
+				for k := range grMap {
+					if k != "" {
+						upstreamGroups[k] = true
+					}
 				}
 			}
 		}

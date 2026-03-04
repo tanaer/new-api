@@ -150,12 +150,21 @@ func FetchSupplierGroups(c *gin.Context) {
 		return
 	}
 
-	// 提取 usable_group
+	// 提取 usable_group（支持 object {name: desc} 和 array [name, ...] 两种格式）
 	var usableGroups []string
 	if ug, ok := pricingResp["usable_group"]; ok {
-		if ugArr, ok := ug.([]interface{}); ok {
-			for _, g := range ugArr {
-				if gStr, ok := g.(string); ok {
+		switch ugTyped := ug.(type) {
+		case map[string]interface{}:
+			// New API 格式: {"group_name": "description", ...}
+			for groupName := range ugTyped {
+				if groupName != "" { // 跳过空字符串key
+					usableGroups = append(usableGroups, groupName)
+				}
+			}
+		case []interface{}:
+			// 数组格式: ["group1", "group2", ...]
+			for _, g := range ugTyped {
+				if gStr, ok := g.(string); ok && gStr != "" {
 					usableGroups = append(usableGroups, gStr)
 				}
 			}
@@ -174,6 +183,15 @@ func FetchSupplierGroups(c *gin.Context) {
 					f, _ := val.Float64()
 					groupRatios[k] = f
 				}
+			}
+		}
+	}
+
+	// 如果 usable_group 为空，尝试从 group_ratio 的 key 中提取
+	if len(usableGroups) == 0 {
+		for k := range groupRatios {
+			if k != "" {
+				usableGroups = append(usableGroups, k)
 			}
 		}
 	}
@@ -387,12 +405,8 @@ func CheckSupplierBalance(c *gin.Context) {
 		return
 	}
 
-	if supplier.Cookie == "" && (supplier.Username == "" || supplier.Password == "") {
-		c.JSON(http.StatusOK, gin.H{"success": false, "message": "未配置凭证信息，无法查询余额"})
-		return
-	}
-
 	// 尝试通过上游 API 查询余额
+	// 上游如果也是 New API, 需要先登录获取 session，或者用 Cookie/AccessToken
 	balanceURL := supplier.BaseURL + "/api/user/self"
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, err := http.NewRequest("GET", balanceURL, nil)
@@ -401,9 +415,25 @@ func CheckSupplierBalance(c *gin.Context) {
 		return
 	}
 
-	// 优先使用 Cookie
+	// Cookie 字段实际上可以存放 Cookie 或 AccessToken
+	hasAuth := false
 	if supplier.Cookie != "" {
-		req.Header.Set("Cookie", supplier.Cookie)
+		cookie := strings.TrimSpace(supplier.Cookie)
+		// 如果以 sk- 或 Bearer 开头，当作 access token
+		if strings.HasPrefix(cookie, "sk-") || strings.HasPrefix(cookie, "Bearer ") {
+			token := strings.TrimPrefix(cookie, "Bearer ")
+			req.Header.Set("Authorization", "Bearer "+token)
+		} else {
+			// 当作 Cookie
+			req.Header.Set("Cookie", cookie)
+		}
+		// 上游 New API 需要 New-Api-User 头，填 0 即可让它通过基础检测
+		req.Header.Set("New-Api-User", "0")
+		hasAuth = true
+	}
+	if !hasAuth {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "未配置凭证信息（Cookie 或 AccessToken），无法查询余额"})
+		return
 	}
 
 	resp, err := client.Do(req)
