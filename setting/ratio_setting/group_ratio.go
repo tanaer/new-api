@@ -123,3 +123,18 @@ func CheckGroupRatio(jsonStr string) error {
 	}
 	return nil
 }
+
+// SetGroupRatio 设置单个分组倍率（内存中）
+func SetGroupRatio(name string, ratio float64) {
+	groupRatioMap.Set(name, ratio)
+}
+
+// BatchUpdateGroupRatios 批量更新分组倍率（合并到现有配置，不删除未指定的分组）
+func BatchUpdateGroupRatios(ratios map[string]float64) {
+	groupRatioMap.AddAll(ratios)
+}
+
+// GetGroupRatioMap 获取分组倍率映射表的引用（用于直接操作）
+func GetGroupRatioMap() *types.RWMap[string, float64] {
+	return groupRatioMap
+}

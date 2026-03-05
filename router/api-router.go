@@ -209,10 +209,14 @@ func SetApiRouter(router *gin.Engine) {
 			supplierRoute.PUT("/", controller.UpdateSupplier)
 			supplierRoute.DELETE("/:id", controller.DeleteSupplier)
 			supplierRoute.POST("/:id/fetch_groups", controller.FetchSupplierGroups)
+			supplierRoute.POST("/:id/fetch_groups_with_keys", controller.FetchSupplierGroupsWithKeys)
 			supplierRoute.PUT("/:id/markup", controller.UpdateSupplierMarkup)
 			supplierRoute.PUT("/bulk_markup", controller.BulkUpdateMarkup)
 			supplierRoute.PUT("/group", controller.UpdateSupplierGroup)
 			supplierRoute.POST("/:id/check_balance", controller.CheckSupplierBalance)
+			// 一站式同步
+			supplierRoute.POST("/:id/sync_full", controller.SyncSupplierFull)
+			supplierRoute.POST("/sync_all_full", controller.SyncAllSuppliersFull)
 		}
 		notificationRoute := apiRouter.Group("/notification")
 		notificationRoute.Use(middleware.RootAuth())

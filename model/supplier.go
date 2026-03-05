@@ -14,6 +14,7 @@ type Supplier struct {
 	Username           string  `json:"username" gorm:"type:varchar(255);default:''"`
 	Password           string  `json:"password" gorm:"type:varchar(255);default:''"`
 	Cookie             string  `json:"cookie" gorm:"type:text"`
+	UpstreamUserID     int     `json:"upstream_user_id" gorm:"default:0"`
 	Markup             float64 `json:"markup" gorm:"default:1.1"`
 	Status             int     `json:"status" gorm:"default:1"` // 1=启用 2=禁用
 	Balance            float64 `json:"balance"`
@@ -30,7 +31,10 @@ type SupplierGroup struct {
 	ApiKey        string  `json:"api_key" gorm:"type:text"`
 	LocalGroup    string  `json:"local_group" gorm:"type:varchar(64);default:''"`
 	GroupRatio    float64 `json:"group_ratio" gorm:"default:1.0"`
-	Status        int     `json:"status" gorm:"default:1"`
+	// 新增字段
+	SupportedModels string `json:"supported_models" gorm:"type:text"` // 该分组支持的模型列表，逗号分隔
+	EndpointType    string `json:"endpoint_type" gorm:"type:varchar(32);default:'openai'"` // 通道类型
+	Status          int    `json:"status" gorm:"default:1"`
 }
 
 // SupplierGroupSyncLog 分组倍率同步日志

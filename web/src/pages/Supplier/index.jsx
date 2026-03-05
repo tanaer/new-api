@@ -16,6 +16,7 @@ import {
     Input,
     Banner,
     Spin,
+    Collapsible,
 } from '@douyinfe/semi-ui';
 import {
     IconPlus,
@@ -24,6 +25,7 @@ import {
     IconEdit,
     IconSetting,
     IconSearch,
+    IconSync,
 } from '@douyinfe/semi-icons';
 import { API } from '../../helpers/api';
 
@@ -41,9 +43,12 @@ const SupplierPage = () => {
     const [groups, setGroups] = useState([]);
     const [groupsLoading, setGroupsLoading] = useState(false);
     const [fetchingGroups, setFetchingGroups] = useState(false);
+    const [fetchingGroupsWithKeys, setFetchingGroupsWithKeys] = useState(false);
     const [bulkMarkupVisible, setBulkMarkupVisible] = useState(false);
     const [bulkMarkup, setBulkMarkup] = useState(1.1);
     const [existingGroups, setExistingGroups] = useState([]);
+    const [syncingFull, setSyncingFull] = useState(false);
+    const [syncingAllFull, setSyncingAllFull] = useState(false);
 
     const loadSuppliers = useCallback(async () => {
         setLoading(true);
@@ -78,7 +83,7 @@ const SupplierPage = () => {
     // 打开编辑
     const openEdit = (supplier = null) => {
         setEditingSupplier(
-            supplier || { name: '', base_url: '', username: '', password: '', cookie: '', markup: 1.1, status: 1 },
+            supplier || { name: '', base_url: '', username: '', password: '', cookie: '', upstream_user_id: 0, markup: 1.1, status: 1 },
         );
         setShowEdit(true);
     };
@@ -149,6 +154,43 @@ const SupplierPage = () => {
         }
     };
 
+    // 采集分组并自动创建/回填分组密钥
+    const fetchGroupsWithKeys = async () => {
+        if (!currentSupplier) return;
+        setFetchingGroupsWithKeys(true);
+        try {
+            const res = await API.post(`${API_BASE}/${currentSupplier.id}/fetch_groups_with_keys`);
+            if (res.data.data) {
+                setGroups(res.data.data || []);
+            }
+            if (res.data.success) {
+                Toast.success(res.data.message);
+            } else if (res.data.data) {
+                Toast.warning(res.data.message);
+            } else {
+                Toast.error(res.data.message);
+            }
+
+            if (Array.isArray(res.data.warnings) && res.data.warnings.length > 0) {
+                Modal.warning({
+                    title: '部分分组密钥处理失败',
+                    content: (
+                        <div style={{ maxHeight: 280, overflow: 'auto' }}>
+                            {res.data.warnings.map((msg, idx) => (
+                                <div key={idx} style={{ marginBottom: 6 }}>
+                                    {msg}
+                                </div>
+                            ))}
+                        </div>
+                    ),
+                });
+            }
+            loadSuppliers();
+        } finally {
+            setFetchingGroupsWithKeys(false);
+        }
+    };
+
     // 更新分组配置
     const updateGroup = async (group) => {
         try {
@@ -199,7 +241,25 @@ const SupplierPage = () => {
         try {
             const res = await API.post(`${API_BASE}/${supplierId}/check_balance`);
             if (res.data.success) {
-                Toast.info(`余额信息: ${JSON.stringify(res.data.data)}`);
+                const data = res.data.data || {};
+                const remaining = Number(data.remaining_quota || 0);
+                const used = data.used_quota !== null && data.used_quota !== undefined
+                    ? Number(data.used_quota)
+                    : null;
+                const total = data.total_quota !== null && data.total_quota !== undefined
+                    ? Number(data.total_quota)
+                    : null;
+                const username = data.display_name || data.username || '';
+                const userLabel = username ? `（${username}）` : '';
+
+                let msg = `余额信息${userLabel}: 剩余 ${remaining.toLocaleString()}`;
+                if (used !== null) {
+                    msg += `，已用 ${used.toLocaleString()}`;
+                }
+                if (total !== null) {
+                    msg += `，总额 ${total.toLocaleString()}`;
+                }
+                Toast.info(msg);
             } else {
                 Toast.error(res.data.message);
             }
@@ -208,9 +268,74 @@ const SupplierPage = () => {
         }
     };
 
+    // 一键同步（一站式）
+    const syncFull = async () => {
+        if (!currentSupplier) return;
+        setSyncingFull(true);
+        try {
+            const res = await API.post(`${API_BASE}/${currentSupplier.id}/sync_full`);
+            if (res.data.success) {
+                Toast.success(res.data.message);
+                if (res.data.groups) {
+                    setGroups(res.data.groups);
+                }
+            } else {
+                Toast.error(res.data.message);
+            }
+            if (Array.isArray(res.data.warnings) && res.data.warnings.length > 0) {
+                Modal.warning({
+                    title: '同步警告',
+                    content: (
+                        <div style={{ maxHeight: 280, overflow: 'auto' }}>
+                            {res.data.warnings.map((msg, idx) => (
+                                <div key={idx} style={{ marginBottom: 6 }}>
+                                    {msg}
+                                </div>
+                            ))}
+                        </div>
+                    ),
+                });
+            }
+            loadSuppliers();
+        } finally {
+            setSyncingFull(false);
+        }
+    };
+
+    // 同步所有供应商
+    const syncAllFull = async () => {
+        setSyncingAllFull(true);
+        try {
+            const res = await API.post(`${API_BASE}/sync_all_full`);
+            if (res.data.success) {
+                Toast.success(res.data.message);
+            } else {
+                Toast.error(res.data.message);
+            }
+            if (Array.isArray(res.data.warnings) && res.data.warnings.length > 0) {
+                Modal.warning({
+                    title: '同步警告',
+                    content: (
+                        <div style={{ maxHeight: 280, overflow: 'auto' }}>
+                            {res.data.warnings.map((msg, idx) => (
+                                <div key={idx} style={{ marginBottom: 6 }}>
+                                    {msg}
+                                </div>
+                            ))}
+                        </div>
+                    ),
+                });
+            }
+            loadSuppliers();
+        } finally {
+            setSyncingAllFull(false);
+        }
+    };
+
     const columns = [
         { title: 'ID', dataIndex: 'id', width: 60 },
         { title: '名称', dataIndex: 'name', width: 150 },
+        { title: '上游用户ID', dataIndex: 'upstream_user_id', width: 120 },
         {
             title: 'API 地址',
             dataIndex: 'base_url',
@@ -314,6 +439,24 @@ const SupplierPage = () => {
                 />
             ),
         },
+        {
+            title: '通道类型',
+            dataIndex: 'endpoint_type',
+            width: 100,
+            render: (v) => <Tag>{v || 'openai'}</Tag>,
+        },
+        {
+            title: '支持模型',
+            dataIndex: 'supported_models',
+            width: 150,
+            render: (v) => {
+                if (!v) return <Text type='tertiary'>-</Text>;
+                const models = v.split(',').filter(m => m);
+                if (models.length === 0) return <Text type='tertiary'>-</Text>;
+                if (models.length <= 3) return <Text>{models.join(', ')}</Text>;
+                return <Text>{models.slice(0, 3).join(', ')}... (+{models.length - 3})</Text>;
+            },
+        },
     ];
 
     return (
@@ -327,9 +470,20 @@ const SupplierPage = () => {
                         刷新
                     </Button>
                 </Space>
-                <Button theme='light' type='warning' onClick={() => setBulkMarkupVisible(true)}>
-                    一键设置所有倍率
-                </Button>
+                <Space>
+                    <Button
+                        theme='solid'
+                        type='primary'
+                        icon={<IconSync />}
+                        loading={syncingAllFull}
+                        onClick={syncAllFull}
+                    >
+                        一键同步所有供应商
+                    </Button>
+                    <Button theme='light' type='warning' onClick={() => setBulkMarkupVisible(true)}>
+                        一键设置所有倍率
+                    </Button>
+                </Space>
             </div>
 
             <Table
@@ -358,7 +512,8 @@ const SupplierPage = () => {
                         <Form.Input field='base_url' label='API地址' rules={[{ required: true, message: '请输入API地址' }]} />
                         <Form.Input field='username' label='账号' />
                         <Form.Input field='password' label='密码' mode='password' />
-                        <Form.TextArea field='cookie' label='Cookie' placeholder='有Cookie优先使用Cookie' autosize rows={2} />
+                        <Form.TextArea field='cookie' label='Cookie/Token' placeholder='可填 Cookie 或 AccessToken（支持 sk-xxx / Bearer xxx）' autosize rows={2} />
+                        <Form.InputNumber field='upstream_user_id' label='上游用户ID' min={0} step={1} />
                         <Form.InputNumber field='markup' label='加价倍率' min={0} step={0.01} />
                         <Form.Select field='status' label='状态' optionList={[
                             { label: '启用', value: 1 },
@@ -379,23 +534,42 @@ const SupplierPage = () => {
                 title={`分组管理 - ${currentSupplier?.name || ''}`}
                 visible={showGroups}
                 onCancel={() => setShowGroups(false)}
-                width={750}
+                width={900}
             >
                 <div style={{ marginBottom: 16 }}>
-                    <Space>
-                        <Button icon={<IconSearch />} loading={fetchingGroups} onClick={fetchGroups} theme='solid'>
-                            一键采集分组
+                    <Space wrap>
+                        <Button
+                            icon={<IconSync />}
+                            loading={syncingFull}
+                            onClick={syncFull}
+                            theme='solid'
+                            type='primary'
+                            size='large'
+                        >
+                            一键同步（推荐）
                         </Button>
-                        {currentSupplier && (
-                            <Descriptions
-                                row
-                                size='small'
-                                data={[
-                                    { key: '当前倍率', value: `×${currentSupplier.markup?.toFixed(2)}` },
-                                ]}
-                            />
-                        )}
+                        <Button icon={<IconSearch />} loading={fetchingGroups} onClick={fetchGroups}>
+                            仅采集分组
+                        </Button>
+                        <Button
+                            loading={fetchingGroupsWithKeys}
+                            onClick={fetchGroupsWithKeys}
+                            type='warning'
+                        >
+                            采集+生成密钥
+                        </Button>
                     </Space>
+                    {currentSupplier && (
+                        <Descriptions
+                            row
+                            size='small'
+                            style={{ marginTop: 12 }}
+                            data={[
+                                { key: '当前倍率', value: `×${currentSupplier.markup?.toFixed(2)}` },
+                                { key: '上游用户ID', value: currentSupplier.upstream_user_id || 0 },
+                            ]}
+                        />
+                    )}
                 </div>
 
                 {groupsLoading ? (
@@ -409,11 +583,32 @@ const SupplierPage = () => {
                         size='small'
                     />
                 ) : (
-                    <Banner type='info' description='暂无分组数据，请先采集分组' />
+                    <Banner type='info' description='暂无分组数据，请先采集分组或使用一键同步' />
                 )}
 
+                {/* 操作说明 */}
+                <Collapsible style={{ marginTop: 24 }}>
+                    <Collapsible.Header title='操作说明'>
+                        <Text>点击展开/收起</Text>
+                    </Collapsible.Header>
+                    <Collapsible.Body>
+                        <div style={{ padding: 12, background: 'var(--semi-color-fill-0)', borderRadius: 8 }}>
+                            <Text>
+                                <strong>一键同步会自动完成以下操作：</strong><br/>
+                                1. 从上游 /api/pricing 采集分组信息（倍率、支持的模型、通道类型）<br/>
+                                2. 自动映射本地分组（根据名称规则：cc→cc开头、codex/openai→codex开头、gemini→gemini开头，找倍率最接近的）<br/>
+                                3. 为每个分组生成/回填 API 密钥<br/>
+                                4. 同步倍率到系统（只同步已映射的本地分组，不会把上游分组加入系统）<br/>
+                                5. 创建/更新渠道（自动填充分组、模型、通道类型）<br/>
+                                6. 禁用上游已不存在的渠道<br/><br/>
+                                <strong>建议流程：</strong> 点击「一键同步」→ 检查本地分组映射是否正确 → 如需调整手动修改 → 再次点击「一键同步」
+                            </Text>
+                        </div>
+                    </Collapsible.Body>
+                </Collapsible>
+
                 {currentSupplier && (
-                    <div style={{ marginTop: 24, padding: 16, background: 'var(--semi-color-fill-0)', borderRadius: 8 }}>
+                    <div style={{ marginTop: 16, padding: 16, background: 'var(--semi-color-fill-0)', borderRadius: 8 }}>
                         <Text strong>调整倍率并重算通道状态</Text>
                         <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
                             <InputNumber
