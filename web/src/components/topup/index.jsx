@@ -767,6 +767,7 @@ const TopUp = () => {
           enableOnlineTopUp={enableOnlineTopUp}
           enableStripeTopUp={enableStripeTopUp}
           enableCreemTopUp={enableCreemTopUp}
+          enableBepusdtTopUp={enableBepusdtTopUp}
           creemProducts={creemProducts}
           creemPreTopUp={creemPreTopUp}
           presetAmounts={presetAmounts}
