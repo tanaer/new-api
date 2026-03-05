@@ -220,6 +220,8 @@ func SetApiRouter(router *gin.Engine) {
 			// 一站式同步
 			supplierRoute.POST("/:id/sync_full", controller.SyncSupplierFull)
 			supplierRoute.POST("/sync_all_full", controller.SyncAllSuppliersFull)
+			supplierRoute.POST("/:id/batch_create_channels", controller.BatchCreateChannels)
+			supplierRoute.POST("/:id/batch_map_local", controller.BatchMapLocalGroup)
 		}
 		notificationRoute := apiRouter.Group("/notification")
 		notificationRoute.Use(middleware.RootAuth())

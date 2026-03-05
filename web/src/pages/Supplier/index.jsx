@@ -17,6 +17,8 @@ import {
     Banner,
     Spin,
     Collapsible,
+    Checkbox,
+    Divider,
 } from '@douyinfe/semi-ui';
 import {
     IconPlus,
@@ -49,6 +51,11 @@ const SupplierPage = () => {
     const [existingGroups, setExistingGroups] = useState([]);
     const [syncingFull, setSyncingFull] = useState(false);
     const [syncingAllFull, setSyncingAllFull] = useState(false);
+    
+    // 新增状态：未映射分组和选中状态
+    const [unmappedGroups, setUnmappedGroups] = useState([]);
+    const [selectedGroupIds, setSelectedGroupIds] = useState([]);
+    const [batchCreating, setBatchCreating] = useState(false);
 
     const loadSuppliers = useCallback(async () => {
         setLoading(true);
@@ -112,7 +119,7 @@ const SupplierPage = () => {
         try {
             const res = await API.delete(`${API_BASE}/${id}`);
             if (res.data.success) {
-                Toast.success(res.data.message);
+                Toast.success('删除成功');
                 loadSuppliers();
             } else {
                 Toast.error(res.data.message);
@@ -127,28 +134,33 @@ const SupplierPage = () => {
         setCurrentSupplier(supplier);
         setShowGroups(true);
         setGroupsLoading(true);
+        setSelectedGroupIds([]);
+        setUnmappedGroups([]);
         try {
-            const res = await API.get(`${API_BASE}/${supplier.id}`);
+            const res = await API.get(`${API_BASE}/${supplier.id}/groups`);
             if (res.data.success) {
-                setGroups(res.data.data.groups || []);
+                setGroups(res.data.data || []);
             }
         } finally {
             setGroupsLoading(false);
         }
     };
 
-    // 一键采集分组
+    // 采集分组
     const fetchGroups = async () => {
         if (!currentSupplier) return;
         setFetchingGroups(true);
         try {
             const res = await API.post(`${API_BASE}/${currentSupplier.id}/fetch_groups`);
+            if (res.data.data) {
+                setGroups(res.data.data || []);
+            }
             if (res.data.success) {
                 Toast.success(res.data.message);
-                setGroups(res.data.data || []);
             } else {
                 Toast.error(res.data.message);
             }
+            loadSuppliers();
         } finally {
             setFetchingGroups(false);
         }
@@ -194,9 +206,18 @@ const SupplierPage = () => {
     // 更新分组配置
     const updateGroup = async (group) => {
         try {
-            const res = await API.put(`${API_BASE}/group`, group);
+            const res = await API.put(`${API_BASE}/group`, {
+                id: group.id,
+                local_group: group.local_group,
+                group_ratio: group.group_ratio,
+            });
             if (res.data.success) {
                 Toast.success('更新成功');
+                // 刷新分组列表
+                const groupsRes = await API.get(`${API_BASE}/${currentSupplier.id}/groups`);
+                if (groupsRes.data.success) {
+                    setGroups(groupsRes.data.data || []);
+                }
             } else {
                 Toast.error(res.data.message);
             }
@@ -205,10 +226,10 @@ const SupplierPage = () => {
         }
     };
 
-    // 修改单个供应商倍率
-    const updateMarkup = async (supplierId, markup) => {
+    // 更新供应商倍率
+    const updateMarkup = async (id, markup) => {
         try {
-            const res = await API.put(`${API_BASE}/${supplierId}/markup`, { markup });
+            const res = await API.put(`${API_BASE}/${id}/markup`, { markup });
             if (res.data.success) {
                 Toast.success(res.data.message);
                 loadSuppliers();
@@ -236,7 +257,7 @@ const SupplierPage = () => {
         }
     };
 
-    // 查询余额
+    // 检查余额
     const checkBalance = async (supplierId) => {
         try {
             const res = await API.post(`${API_BASE}/${supplierId}/check_balance`);
@@ -282,6 +303,14 @@ const SupplierPage = () => {
             } else {
                 Toast.error(res.data.message);
             }
+            
+            // 处理未映射分组
+            if (Array.isArray(res.data.unmapped_groups) && res.data.unmapped_groups.length > 0) {
+                setUnmappedGroups(res.data.unmapped_groups);
+            } else {
+                setUnmappedGroups([]);
+            }
+            
             if (Array.isArray(res.data.warnings) && res.data.warnings.length > 0) {
                 Modal.warning({
                     title: '同步警告',
@@ -332,6 +361,107 @@ const SupplierPage = () => {
         }
     };
 
+    // 批量创建渠道
+    const batchCreateChannels = async () => {
+        if (!currentSupplier || selectedGroupIds.length === 0) {
+            Toast.warning('请先选择要创建渠道的分组');
+            return;
+        }
+        
+        setBatchCreating(true);
+        try {
+            const res = await API.post(`${API_BASE}/${currentSupplier.id}/batch_create_channels`, {
+                group_ids: selectedGroupIds,
+            });
+            if (res.data.success) {
+                Toast.success(res.data.message);
+                setSelectedGroupIds([]);
+                // 刷新分组列表
+                const groupsRes = await API.get(`${API_BASE}/${currentSupplier.id}/groups`);
+                if (groupsRes.data.success) {
+                    setGroups(groupsRes.data.data || []);
+                    // 更新未映射列表
+                    const unmapped = (groupsRes.data.data || []).filter(g => !g.local_group);
+                    setUnmappedGroups(unmapped.map(g => ({
+                        id: g.id,
+                        upstream_group: g.upstream_group,
+                        group_ratio: g.group_ratio,
+                        supported_models: g.supported_models,
+                        endpoint_type: g.endpoint_type,
+                        has_api_key: !!g.api_key,
+                    })));
+                }
+            } else {
+                Toast.error(res.data.message);
+            }
+            if (Array.isArray(res.data.warnings) && res.data.warnings.length > 0) {
+                Modal.info({
+                    title: '批量创建结果',
+                    content: (
+                        <div style={{ maxHeight: 280, overflow: 'auto' }}>
+                            {res.data.warnings.map((msg, idx) => (
+                                <div key={idx} style={{ marginBottom: 6 }}>
+                                    {msg}
+                                </div>
+                            ))}
+                        </div>
+                    ),
+                });
+            }
+        } finally {
+            setBatchCreating(false);
+        }
+    };
+
+    // 批量设置本地分组映射
+    const batchMapLocalGroup = async (groupId, localGroup) => {
+        try {
+            const res = await API.post(`${API_BASE}/${currentSupplier.id}/batch_map_local`, {
+                mappings: [{ group_id: groupId, local_group: localGroup }],
+            });
+            if (res.data.success) {
+                Toast.success('映射成功');
+                if (res.data.groups) {
+                    setGroups(res.data.groups);
+                }
+                // 更新未映射列表
+                const unmapped = (res.data.groups || []).filter(g => !g.local_group);
+                setUnmappedGroups(unmapped.map(g => ({
+                    id: g.id,
+                    upstream_group: g.upstream_group,
+                    group_ratio: g.group_ratio,
+                    supported_models: g.supported_models,
+                    endpoint_type: g.endpoint_type,
+                    has_api_key: !!g.api_key,
+                })));
+            } else {
+                Toast.error(res.data.message);
+            }
+        } catch (e) {
+            Toast.error('映射失败');
+        }
+    };
+
+    // 切换分组选中状态
+    const toggleGroupSelection = (groupId) => {
+        setSelectedGroupIds(prev => {
+            if (prev.includes(groupId)) {
+                return prev.filter(id => id !== groupId);
+            } else {
+                return [...prev, groupId];
+            }
+        });
+    };
+
+    // 全选/取消全选
+    const toggleSelectAll = () => {
+        if (selectedGroupIds.length === unmappedGroups.length) {
+            setSelectedGroupIds([]);
+        } else {
+            setSelectedGroupIds(unmappedGroups.map(g => g.id));
+        }
+    };
+
     const columns = [
         { title: 'ID', dataIndex: 'id', width: 60 },
         { title: '名称', dataIndex: 'name', width: 150 },
@@ -371,17 +501,20 @@ const SupplierPage = () => {
             width: 300,
             render: (_, record) => (
                 <Space>
-                    <Button size='small' icon={<IconEdit />} onClick={() => openEdit(record)}>
+                    <Button size='small' theme='light' onClick={() => openGroups(record)}>
+                        分组管理
+                    </Button>
+                    <Button size='small' theme='light' onClick={() => openEdit(record)}>
                         编辑
                     </Button>
-                    <Button size='small' icon={<IconSetting />} onClick={() => openGroups(record)}>
-                        分组
+                    <Button size='small' theme='light' onClick={() => checkBalance(record.id)}>
+                        查余额
                     </Button>
-                    <Button size='small' onClick={() => checkBalance(record.id)}>
-                        余额
-                    </Button>
-                    <Popconfirm title='确认删除？' onConfirm={() => deleteSupplier(record.id)}>
-                        <Button size='small' type='danger' icon={<IconDelete />}>
+                    <Popconfirm
+                        title='确定删除？'
+                        onConfirm={() => deleteSupplier(record.id)}
+                    >
+                        <Button size='small' type='danger' theme='light'>
                             删除
                         </Button>
                     </Popconfirm>
@@ -390,54 +523,41 @@ const SupplierPage = () => {
         },
     ];
 
-    // 分组列
     const groupColumns = [
-        { title: '上游分组', dataIndex: 'upstream_group', width: 120 },
         {
-            title: '分组倍率',
-            dataIndex: 'group_ratio',
-            width: 100,
-            render: (v) => <Tag color='blue'>×{v?.toFixed(4)}</Tag>,
-        },
-        {
-            title: 'API密钥',
-            dataIndex: 'api_key',
-            width: 200,
-            render: (text, record, index) => (
-                <Input
-                    defaultValue={text}
-                    placeholder='输入API密钥'
-                    size='small'
-                    onBlur={(e) => {
-                        const newGroups = [...groups];
-                        newGroups[index] = { ...newGroups[index], api_key: e.target.value };
-                        setGroups(newGroups);
-                        updateGroup({ ...newGroups[index] });
-                    }}
-                />
-            ),
+            title: '上游分组',
+            dataIndex: 'upstream_group',
+            width: 150,
+            render: (text) => <Tag color='blue'>{text}</Tag>,
         },
         {
             title: '本地分组',
             dataIndex: 'local_group',
             width: 180,
-            render: (text, record, index) => (
+            render: (text, record) => (
                 <Select
-                    defaultValue={text || undefined}
+                    value={text || undefined}
                     placeholder='选择本地分组'
-                    size='small'
-                    filter
-                    allowCreate
-                    style={{ width: 160 }}
+                    style={{ width: '100%' }}
                     optionList={existingGroups}
+                    filter
                     onChange={(value) => {
-                        const newGroups = [...groups];
-                        newGroups[index] = { ...newGroups[index], local_group: value };
-                        setGroups(newGroups);
-                        updateGroup({ ...newGroups[index] });
+                        const updated = groups.map(g => 
+                            g.id === record.id ? { ...g, local_group: value } : g
+                        );
+                        setGroups(updated);
+                        // 自动保存
+                        batchMapLocalGroup(record.id, value);
                     }}
+                    allowClear
                 />
             ),
+        },
+        {
+            title: '倍率',
+            dataIndex: 'group_ratio',
+            width: 80,
+            render: (text) => <Tag color='cyan'>×{text?.toFixed(3)}</Tag>,
         },
         {
             title: '通道类型',
@@ -457,15 +577,22 @@ const SupplierPage = () => {
                 return <Text>{models.slice(0, 3).join(', ')}... (+{models.length - 3})</Text>;
             },
         },
+        {
+            title: 'API密钥',
+            dataIndex: 'api_key',
+            width: 100,
+            render: (text) => (
+                <Tag color={text ? 'green' : 'red'}>
+                    {text ? '已配置' : '未配置'}
+                </Tag>
+            ),
+        },
     ];
 
     return (
-        <div className='mt-[60px] px-2'>
-            <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ padding: 20 }}>
+            <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between' }}>
                 <Space>
-                    <Button icon={<IconPlus />} theme='solid' onClick={() => openEdit()}>
-                        添加供应商
-                    </Button>
                     <Button icon={<IconRefresh />} onClick={loadSuppliers}>
                         刷新
                     </Button>
@@ -534,7 +661,7 @@ const SupplierPage = () => {
                 title={`分组管理 - ${currentSupplier?.name || ''}`}
                 visible={showGroups}
                 onCancel={() => setShowGroups(false)}
-                width={900}
+                width={1000}
             >
                 <div style={{ marginBottom: 16 }}>
                     <Space wrap>
@@ -575,13 +702,126 @@ const SupplierPage = () => {
                 {groupsLoading ? (
                     <Spin size='large' />
                 ) : groups.length > 0 ? (
-                    <Table
-                        columns={groupColumns}
-                        dataSource={groups}
-                        rowKey='id'
-                        pagination={false}
-                        size='small'
-                    />
+                    <>
+                        <Table
+                            columns={groupColumns}
+                            dataSource={groups}
+                            rowKey='id'
+                            pagination={false}
+                            size='small'
+                        />
+                        
+                        {/* 未映射分组提示 */}
+                        {unmappedGroups.length > 0 && (
+                            <div style={{ marginTop: 24 }}>
+                                <Divider margin='12px'>
+                                    <Text type='warning' strong>
+                                        未映射分组 ({unmappedGroups.length}个) - 请手动映射后再创建渠道
+                                    </Text>
+                                </Divider>
+                                
+                                <div style={{ marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <Space>
+                                        <Checkbox
+                                            checked={selectedGroupIds.length === unmappedGroups.length && unmappedGroups.length > 0}
+                                            indeterminate={selectedGroupIds.length > 0 && selectedGroupIds.length < unmappedGroups.length}
+                                            onChange={toggleSelectAll}
+                                        >
+                                            全选
+                                        </Checkbox>
+                                        <Text type='tertiary'>已选择 {selectedGroupIds.length} 个</Text>
+                                    </Space>
+                                    <Button
+                                        type='primary'
+                                        theme='solid'
+                                        disabled={selectedGroupIds.length === 0}
+                                        loading={batchCreating}
+                                        onClick={batchCreateChannels}
+                                    >
+                                        批量创建选中渠道
+                                    </Button>
+                                </div>
+                                
+                                <Table
+                                    columns={[
+                                        {
+                                            title: '选择',
+                                            width: 60,
+                                            render: (_, record) => (
+                                                <Checkbox
+                                                    checked={selectedGroupIds.includes(record.id)}
+                                                    onChange={() => toggleGroupSelection(record.id)}
+                                                />
+                                            ),
+                                        },
+                                        {
+                                            title: '上游分组',
+                                            dataIndex: 'upstream_group',
+                                            width: 150,
+                                            render: (text) => <Tag color='orange'>{text}</Tag>,
+                                        },
+                                        {
+                                            title: '映射到本地分组',
+                                            width: 200,
+                                            render: (_, record) => {
+                                                const group = groups.find(g => g.id === record.id);
+                                                return (
+                                                    <Select
+                                                        value={group?.local_group || undefined}
+                                                        placeholder='选择本地分组'
+                                                        style={{ width: '100%' }}
+                                                        optionList={existingGroups}
+                                                        filter
+                                                        onChange={(value) => {
+                                                            batchMapLocalGroup(record.id, value);
+                                                        }}
+                                                        allowClear
+                                                    />
+                                                );
+                                            },
+                                        },
+                                        {
+                                            title: '倍率',
+                                            dataIndex: 'group_ratio',
+                                            width: 80,
+                                            render: (text) => <Tag color='cyan'>×{text?.toFixed(3)}</Tag>,
+                                        },
+                                        {
+                                            title: '通道类型',
+                                            dataIndex: 'endpoint_type',
+                                            width: 100,
+                                            render: (v) => <Tag>{v || 'openai'}</Tag>,
+                                        },
+                                        {
+                                            title: 'API密钥',
+                                            dataIndex: 'has_api_key',
+                                            width: 100,
+                                            render: (v) => (
+                                                <Tag color={v ? 'green' : 'red'}>
+                                                    {v ? '已配置' : '未配置'}
+                                                </Tag>
+                                            ),
+                                        },
+                                        {
+                                            title: '支持模型',
+                                            dataIndex: 'supported_models',
+                                            render: (v) => {
+                                                if (!v) return <Text type='tertiary'>-</Text>;
+                                                const models = v.split(',').filter(m => m);
+                                                if (models.length === 0) return <Text type='tertiary'>-</Text>;
+                                                if (models.length <= 3) return <Text>{models.join(', ')}</Text>;
+                                                return <Text>{models.slice(0, 3).join(', ')}... (+{models.length - 3})</Text>;
+                                            },
+                                        },
+                                    ]}
+                                    dataSource={unmappedGroups}
+                                    rowKey='id'
+                                    pagination={false}
+                                    size='small'
+                                />
+                            </div>
+                        )}
+                    </>
                 ) : (
                     <Banner type='info' description='暂无分组数据，请先采集分组或使用一键同步' />
                 )}
@@ -598,10 +838,14 @@ const SupplierPage = () => {
                                 1. 从上游 /api/pricing 采集分组信息（倍率、支持的模型、通道类型）<br/>
                                 2. 自动映射本地分组（根据名称规则：cc→cc开头、codex/openai→codex开头、gemini→gemini开头，找倍率最接近的）<br/>
                                 3. 为每个分组生成/回填 API 密钥<br/>
-                                4. 同步倍率到系统（只同步已映射的本地分组，不会把上游分组加入系统）<br/>
-                                5. 创建/更新渠道（自动填充分组、模型、通道类型）<br/>
+                                4. 同步倍率到系统（只同步已映射的本地分组）<br/>
+                                5. 更新已存在的渠道（不自动创建新渠道）<br/>
                                 6. 禁用上游已不存在的渠道<br/><br/>
-                                <strong>建议流程：</strong> 点击「一键同步」→ 检查本地分组映射是否正确 → 如需调整手动修改 → 再次点击「一键同步」
+                                <strong>重要：未映射分组处理流程</strong><br/>
+                                1. 如果上游分组无法自动匹配到本地分组，会显示在「未映射分组」列表中<br/>
+                                2. 手动为未映射分组选择对应的本地分组<br/>
+                                3. 勾选需要创建渠道的分组，点击「批量创建选中渠道」<br/><br/>
+                                <strong>建议流程：</strong> 点击「一键同步」→ 检查未映射分组 → 手动映射 → 批量创建渠道
                             </Text>
                         </div>
                     </Collapsible.Body>

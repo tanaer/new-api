@@ -1516,8 +1516,23 @@ func SyncSupplierFull(c *gin.Context) {
 	}
 	details["ratios_synced"] = syncedRatios
 
-	// ========== Step 4: 创建/更新渠道 ==========
-	channelsCreated := 0
+	// ========== Step 4: 统计未映射分组 ==========
+	unmappedGroups := make([]map[string]interface{}, 0)
+	for _, group := range groups {
+		if strings.TrimSpace(group.LocalGroup) == "" {
+			unmappedGroups = append(unmappedGroups, map[string]interface{}{
+				"id":               group.Id,
+				"upstream_group":   group.UpstreamGroup,
+				"group_ratio":      group.GroupRatio,
+				"supported_models": group.SupportedModels,
+				"endpoint_type":    group.EndpointType,
+				"has_api_key":      strings.TrimSpace(group.ApiKey) != "",
+			})
+		}
+	}
+	details["unmapped_count"] = len(unmappedGroups)
+
+	// ========== Step 5: 更新现有渠道（不创建新渠道）==========
 	channelsUpdated := 0
 	channelsDisabled := 0
 
@@ -1528,7 +1543,7 @@ func SyncSupplierFull(c *gin.Context) {
 		existingMap[ch.Group] = ch
 	}
 
-	// 上游分组集合（已映射本地分组的）
+	// 上游分组集合（已映射本地分组且有密钥的）
 	upstreamLocalGroups := make(map[string]bool)
 
 	for _, group := range groups {
@@ -1541,7 +1556,7 @@ func SyncSupplierFull(c *gin.Context) {
 		channelType := getChannelTypeByGroupName(group.LocalGroup)
 
 		if existingCh, exists := existingMap[group.LocalGroup]; exists {
-			// 更新现有渠道
+			// 只更新现有渠道，不创建新渠道
 			changed := false
 			if existingCh.Key != group.ApiKey {
 				existingCh.Key = group.ApiKey
@@ -1562,28 +1577,11 @@ func SyncSupplierFull(c *gin.Context) {
 					channelsUpdated++
 				}
 			}
-		} else {
-			// 创建新渠道
-			channel := &model.Channel{
-				Type:        channelType,
-				Key:         group.ApiKey,
-				Name:        fmt.Sprintf("%s-%s", supplier.Name, group.LocalGroup),
-				BaseURL:     &supplier.BaseURL,
-				Group:       group.LocalGroup,
-				Models:      group.SupportedModels,
-				Status:      common.ChannelStatusEnabled,
-				CreatedTime: common.GetTimestamp(),
-				SupplierID:  id,
-			}
-			if err := channel.Insert(); err != nil {
-				warnings = append(warnings, fmt.Sprintf("创建渠道 %s 失败: %v", group.LocalGroup, err))
-			} else {
-				channelsCreated++
-			}
 		}
+		// 不再自动创建新渠道
 	}
 
-	// ========== Step 5: 禁用上游不存在的渠道 ==========
+	// ========== Step 6: 禁用上游不存在的渠道 ==========
 	for localGroup, ch := range existingMap {
 		if !upstreamLocalGroups[localGroup] {
 			// 上游已无此分组，禁用渠道
@@ -1594,7 +1592,6 @@ func SyncSupplierFull(c *gin.Context) {
 		}
 	}
 
-	details["channels_created"] = channelsCreated
 	details["channels_updated"] = channelsUpdated
 	details["channels_disabled"] = channelsDisabled
 
@@ -1602,8 +1599,8 @@ func SyncSupplierFull(c *gin.Context) {
 	service.ResetProxyClientCache()
 
 	// 记录同步日志
-	logDetails := fmt.Sprintf("分组:+%d/~%d, 倍率:%d, 渠道:+%d/~%d/-%d",
-		groupsAdded, groupsUpdated, syncedRatios, channelsCreated, channelsUpdated, channelsDisabled)
+	logDetails := fmt.Sprintf("分组:+%d/~%d, 倍率:%d, 渠道:~%d/-%d, 未映射:%d",
+		groupsAdded, groupsUpdated, syncedRatios, channelsUpdated, channelsDisabled, len(unmappedGroups))
 	model.CreateSyncLog(&model.SupplierGroupSyncLog{
 		SupplierID:   id,
 		SupplierName: supplier.Name,
@@ -1612,19 +1609,200 @@ func SyncSupplierFull(c *gin.Context) {
 	})
 
 	// 构建响应消息
-	message := fmt.Sprintf("同步完成: 分组+%d/~%d, 倍率%d个, 渠道+%d/~%d/-%d",
-		groupsAdded, groupsUpdated, syncedRatios, channelsCreated, channelsUpdated, channelsDisabled)
+	message := fmt.Sprintf("同步完成: 分组+%d/~%d, 倍率%d个, 渠道更新%d个, 未映射%d个",
+		groupsAdded, groupsUpdated, syncedRatios, channelsUpdated, len(unmappedGroups))
+
+	// 如果有未映射分组，添加提示
+	if len(unmappedGroups) > 0 {
+		message += fmt.Sprintf("（有%d个分组未映射到本地，请手动处理）", len(unmappedGroups))
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success":  len(warnings) == 0,
+		"success":         len(warnings) == 0,
+		"message":         message,
+		"details":         details,
+		"warnings":        warnings,
+		"groups":          groups,
+		"unmapped_groups": unmappedGroups,
+	})
+}
+
+// BatchCreateChannelsRequest 批量创建渠道请求
+type BatchCreateChannelsRequest struct {
+	GroupIDs []int `json:"group_ids"` // 要创建渠道的分组ID列表
+}
+
+// BatchCreateChannels 批量创建渠道
+func BatchCreateChannels(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "无效的ID"})
+		return
+	}
+
+	supplier, err := model.GetSupplierById(id)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "供应商不存在"})
+		return
+	}
+
+	var req BatchCreateChannelsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "参数错误"})
+		return
+	}
+
+	if len(req.GroupIDs) == 0 {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "请选择要创建渠道的分组"})
+		return
+	}
+
+	// 获取现有渠道
+	existingChannels, _ := model.GetChannelsBySupplierID(id)
+	existingMap := make(map[string]bool) // local_group -> exists
+	for _, ch := range existingChannels {
+		existingMap[ch.Group] = true
+	}
+
+	// 获取所有分组
+	allGroups, _ := model.GetSupplierGroups(id)
+	groupMap := make(map[int]*model.SupplierGroup)
+	for _, g := range allGroups {
+		groupMap[g.Id] = g
+	}
+
+	var warnings []string
+	created := 0
+	skipped := 0
+
+	for _, groupID := range req.GroupIDs {
+		group, exists := groupMap[groupID]
+		if !exists {
+			warnings = append(warnings, fmt.Sprintf("分组ID %d 不存在", groupID))
+			continue
+		}
+
+		// 检查是否有本地分组映射
+		if strings.TrimSpace(group.LocalGroup) == "" {
+			warnings = append(warnings, fmt.Sprintf("分组 %s 未映射本地分组，跳过", group.UpstreamGroup))
+			skipped++
+			continue
+		}
+
+		// 检查是否有API密钥
+		if strings.TrimSpace(group.ApiKey) == "" {
+			warnings = append(warnings, fmt.Sprintf("分组 %s 没有API密钥，跳过", group.UpstreamGroup))
+			skipped++
+			continue
+		}
+
+		// 检查渠道是否已存在
+		if existingMap[group.LocalGroup] {
+			warnings = append(warnings, fmt.Sprintf("本地分组 %s 的渠道已存在，跳过", group.LocalGroup))
+			skipped++
+			continue
+		}
+
+		// 创建渠道
+		channelType := getChannelTypeByGroupName(group.LocalGroup)
+		channel := &model.Channel{
+			Type:        channelType,
+			Key:         group.ApiKey,
+			Name:        fmt.Sprintf("%s-%s", supplier.Name, group.LocalGroup),
+			BaseURL:     &supplier.BaseURL,
+			Group:       group.LocalGroup,
+			Models:      group.SupportedModels,
+			Status:      common.ChannelStatusEnabled,
+			CreatedTime: common.GetTimestamp(),
+			SupplierID:  id,
+		}
+		if err := channel.Insert(); err != nil {
+			warnings = append(warnings, fmt.Sprintf("创建渠道 %s 失败: %v", group.LocalGroup, err))
+			continue
+		}
+		created++
+	}
+
+	// 重置代理缓存
+	service.ResetProxyClientCache()
+
+	message := fmt.Sprintf("批量创建完成: 成功%d个, 跳过%d个", created, skipped)
+	if len(warnings) > 0 && created == 0 {
+		message = "没有创建任何渠道"
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":  created > 0,
 		"message":  message,
-		"details":  details,
+		"created":  created,
+		"skipped":  skipped,
+		"warnings": warnings,
+	})
+}
+
+// BatchMapLocalGroupRequest 批量设置本地分组映射
+type BatchMapLocalGroupRequest struct {
+	Mappings []struct {
+		GroupID    int    `json:"group_id"`
+		LocalGroup string `json:"local_group"`
+	} `json:"mappings"`
+}
+
+// BatchMapLocalGroup 批量设置本地分组映射
+func BatchMapLocalGroup(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "无效的ID"})
+		return
+	}
+
+	var req BatchMapLocalGroupRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "参数错误"})
+		return
+	}
+
+	if len(req.Mappings) == 0 {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "请提供映射关系"})
+		return
+	}
+
+	// 获取所有分组
+	allGroups, _ := model.GetSupplierGroups(id)
+	groupMap := make(map[int]*model.SupplierGroup)
+	for _, g := range allGroups {
+		groupMap[g.Id] = g
+	}
+
+	var warnings []string
+	updated := 0
+
+	for _, mapping := range req.Mappings {
+		group, exists := groupMap[mapping.GroupID]
+		if !exists {
+			warnings = append(warnings, fmt.Sprintf("分组ID %d 不存在", mapping.GroupID))
+			continue
+		}
+
+		group.LocalGroup = strings.TrimSpace(mapping.LocalGroup)
+		if err := model.UpdateSupplierGroup(group); err != nil {
+			warnings = append(warnings, fmt.Sprintf("更新分组 %s 失败: %v", group.UpstreamGroup, err))
+			continue
+		}
+		updated++
+	}
+
+	message := fmt.Sprintf("批量映射完成: 成功%d个", updated)
+	groups, _ := model.GetSupplierGroups(id)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":  updated > 0,
+		"message":  message,
+		"updated":  updated,
 		"warnings": warnings,
 		"groups":   groups,
 	})
 }
-
-// SyncAllSuppliersFull 同步所有供应商（一站式）
 func SyncAllSuppliersFull(c *gin.Context) {
 	suppliers, err := model.GetAllSuppliers()
 	if err != nil {
