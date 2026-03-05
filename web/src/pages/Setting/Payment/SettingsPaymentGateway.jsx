@@ -18,7 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 import React, { useEffect, useState, useRef } from 'react';
-import { Button, Form, Row, Col, Typography, Spin } from '@douyinfe/semi-ui';
+import { Button, Form, Row, Col, Typography, Spin, Divider } from '@douyinfe/semi-ui';
 const { Text } = Typography;
 import {
   API,
@@ -43,6 +43,12 @@ export default function SettingsPaymentGateway(props) {
     PayMethods: '',
     AmountOptions: '',
     AmountDiscount: '',
+    // Bepusdt 配置
+    BepusdtApiUrl: '',
+    BepusdtApiToken: '',
+    BepusdtTradeType: 'usdt.trc20',
+    BepusdtFiat: 'CNY',
+    BepusdtTimeout: 600,
   });
   const [originInputs, setOriginInputs] = useState({});
   const formApiRef = useRef(null);
@@ -66,6 +72,15 @@ export default function SettingsPaymentGateway(props) {
         PayMethods: props.options.PayMethods || '',
         AmountOptions: props.options.AmountOptions || '',
         AmountDiscount: props.options.AmountDiscount || '',
+        // Bepusdt 配置
+        BepusdtApiUrl: props.options.BepusdtApiUrl || '',
+        BepusdtApiToken: props.options.BepusdtApiToken || '',
+        BepusdtTradeType: props.options.BepusdtTradeType || 'usdt.trc20',
+        BepusdtFiat: props.options.BepusdtFiat || 'CNY',
+        BepusdtTimeout:
+          props.options.BepusdtTimeout !== undefined
+            ? parseInt(props.options.BepusdtTimeout)
+            : 600,
       };
 
       // 美化 JSON 展示
@@ -181,6 +196,23 @@ export default function SettingsPaymentGateway(props) {
         });
       }
 
+      // Bepusdt 配置
+      if (inputs.BepusdtApiUrl !== '') {
+        options.push({ key: 'BepusdtApiUrl', value: removeTrailingSlash(inputs.BepusdtApiUrl) });
+      }
+      if (inputs.BepusdtApiToken !== undefined && inputs.BepusdtApiToken !== '') {
+        options.push({ key: 'BepusdtApiToken', value: inputs.BepusdtApiToken });
+      }
+      if (inputs.BepusdtTradeType !== '') {
+        options.push({ key: 'BepusdtTradeType', value: inputs.BepusdtTradeType });
+      }
+      if (inputs.BepusdtFiat !== '') {
+        options.push({ key: 'BepusdtFiat', value: inputs.BepusdtFiat });
+      }
+      if (inputs.BepusdtTimeout !== '') {
+        options.push({ key: 'BepusdtTimeout', value: inputs.BepusdtTimeout.toString() });
+      }
+
       // 发送请求
       const requestQueue = options.map((opt) =>
         API.put('/api/option/', {
@@ -216,7 +248,7 @@ export default function SettingsPaymentGateway(props) {
         onValueChange={handleFormChange}
         getFormApi={(api) => (formApiRef.current = api)}
       >
-        <Form.Section text={t('支付设置')}>
+        <Form.Section text={t('易支付设置')}>
           <Text>
             {t(
               '（当前仅支持易支付接口，默认使用上方服务器地址作为回调地址！）',
@@ -324,7 +356,59 @@ export default function SettingsPaymentGateway(props) {
             </Col>
           </Row>
 
-          <Button onClick={submitPayAddress}>{t('更新支付设置')}</Button>
+          <Divider margin='24px' />
+
+          <Form.Section text={t('Bepusdt 支付设置（USDT加密货币支付）')}>
+            <Text type='tertiary'>
+              {t('Bepusdt 是一个 USDT 加密货币支付网关，支持 TRC20、ERC20 等多种链。')}
+            </Text>
+            <Row gutter={{ xs: 8, sm: 16, md: 24, lg: 24, xl: 24, xxl: 24 }} style={{ marginTop: 16 }}>
+              <Col xs={24} sm={24} md={12} lg={12} xl={12}>
+                <Form.Input
+                  field='BepusdtApiUrl'
+                  label={t('Bepusdt API 地址')}
+                  placeholder={t('例如：https://pay.example.com')}
+                />
+              </Col>
+              <Col xs={24} sm={24} md={12} lg={12} xl={12}>
+                <Form.Input
+                  field='BepusdtApiToken'
+                  label={t('Bepusdt API Token')}
+                  placeholder={t('对接令牌，敏感信息不会发送到前端显示')}
+                  type='password'
+                />
+              </Col>
+            </Row>
+            <Row gutter={{ xs: 8, sm: 16, md: 24, lg: 24, xl: 24, xxl: 24 }} style={{ marginTop: 16 }}>
+              <Col xs={24} sm={24} md={8} lg={8} xl={8}>
+                <Form.Input
+                  field='BepusdtTradeType'
+                  label={t('默认交易类型')}
+                  placeholder={t('例如：usdt.trc20')}
+                  extraText={t('常用：usdt.trc20, usdt.erc20, usdt.bep20, tron.trx')}
+                />
+              </Col>
+              <Col xs={24} sm={24} md={8} lg={8} xl={8}>
+                <Form.Input
+                  field='BepusdtFiat'
+                  label={t('法币类型')}
+                  placeholder={t('例如：CNY')}
+                  extraText={t('可选：CNY, USD, EUR, GBP, JPY')}
+                />
+              </Col>
+              <Col xs={24} sm={24} md={8} lg={8} xl={8}>
+                <Form.InputNumber
+                  field='BepusdtTimeout'
+                  label={t('订单超时时间（秒）')}
+                  placeholder={t('例如：600')}
+                  min={120}
+                  extraText={t('最低 120 秒，默认 600 秒')}
+                />
+              </Col>
+            </Row>
+          </Form.Section>
+
+          <Button type='primary' onClick={submitPayAddress} style={{ marginTop: 16 }}>{t('更新支付设置')}</Button>
         </Form.Section>
       </Form>
     </Spin>

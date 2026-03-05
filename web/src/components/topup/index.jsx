@@ -66,6 +66,7 @@ const TopUp = () => {
   // Creem 相关状态
   const [creemProducts, setCreemProducts] = useState([]);
   const [enableCreemTopUp, setEnableCreemTopUp] = useState(false);
+  const [enableBepusdtTopUp, setEnableBepusdtTopUp] = useState(false);
   const [creemOpen, setCreemOpen] = useState(false);
   const [selectedCreemProduct, setSelectedCreemProduct] = useState(null);
 
@@ -150,9 +151,14 @@ const TopUp = () => {
   };
 
   const preTopUp = async (payment) => {
-    if (payment === 'stripe') {
-      if (!enableStripeTopUp) {
+    if (payment === 'stripe' || payment === 'bepusdt') {
+      if (payment === 'stripe' && !enableStripeTopUp) {
         showError(t('管理员未开启Stripe充值！'));
+        return;
+      }
+    } else if (payment === 'bepusdt') {
+      if (!enableBepusdtTopUp) {
+        showError(t('管理员未开启USDT充值！'));
         return;
       }
     } else {
@@ -165,7 +171,7 @@ const TopUp = () => {
     setPayWay(payment);
     setPaymentLoading(true);
     try {
-      if (payment === 'stripe') {
+      if (payment === 'stripe' || payment === 'bepusdt') {
         await getStripeAmount();
       } else {
         await getAmount();
@@ -184,7 +190,7 @@ const TopUp = () => {
   };
 
   const onlineTopUp = async () => {
-    if (payWay === 'stripe') {
+    if (payWay === 'stripe' || payWay === 'bepusdt') {
       // Stripe 支付处理
       if (amount === 0) {
         await getStripeAmount();
@@ -209,6 +215,12 @@ const TopUp = () => {
           amount: parseInt(topUpCount),
           payment_method: 'stripe',
         });
+      } else if (payWay === 'bepusdt') {
+        // Bepusdt 支付请求
+        res = await API.post('/api/user/bepusdt/pay', {
+          amount: parseInt(topUpCount),
+          payment_method: 'bepusdt',
+        });
       } else {
         // 普通支付请求
         res = await API.post('/api/user/pay', {
@@ -223,6 +235,9 @@ const TopUp = () => {
           if (payWay === 'stripe') {
             // Stripe 支付回调处理
             window.open(data.pay_link, '_blank');
+          } else if (payWay === 'bepusdt') {
+            // Bepusdt 支付回调处理
+            window.open(data.url || data.payment_url, '_blank');
           } else {
             // 普通支付表单提交
             let params = data;
@@ -441,6 +456,18 @@ const TopUp = () => {
           // 如果启用了 Stripe 支付，添加到支付方法列表
           // 这个逻辑现在由后端处理，如果 Stripe 启用，后端会在 pay_methods 中包含它
 
+          // 如果启用了 Bepusdt 支付，添加到支付方法列表
+          if (enableBepusdtTopUp) {
+            const hasBepusdt = payMethods.some((method) => method.type === 'bepusdt');
+            if (!hasBepusdt) {
+              payMethods.push({
+                name: 'USDT支付',
+                type: 'bepusdt',
+                color: 'rgba(38, 161, 123, 1)',
+              });
+            }
+          }
+
           setPayMethods(payMethods);
           const enableStripeTopUp = data.enable_stripe_topup || false;
           const enableOnlineTopUp = data.enable_online_topup || false;
@@ -453,6 +480,8 @@ const TopUp = () => {
           setEnableOnlineTopUp(enableOnlineTopUp);
           setEnableStripeTopUp(enableStripeTopUp);
           setEnableCreemTopUp(enableCreemTopUp);
+          const enableBepusdtTopUp = data.enable_bepusdt_topup || false;
+          setEnableBepusdtTopUp(enableBepusdtTopUp);
           setMinTopUp(minTopUpValue);
           setTopUpCount(minTopUpValue);
 
