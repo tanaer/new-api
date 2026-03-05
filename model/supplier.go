@@ -80,9 +80,9 @@ func DeleteSupplier(id int) error {
 	if err := DB.Where("supplier_id = ?", id).Delete(&SupplierGroup{}).Error; err != nil {
 		return err
 	}
-	// 清除所属通道的 supplier_id
-	if err := DB.Model(&Channel{}).Where("supplier_id = ?", id).Update("supplier_id", 0).Error; err != nil {
-		common.SysLog(fmt.Sprintf("failed to clear supplier_id for channels: supplier_id=%d, error=%v", id, err))
+	// 删除该供应商的所有渠道
+	if err := DB.Where("supplier_id = ?", id).Delete(&Channel{}).Error; err != nil {
+		common.SysLog(fmt.Sprintf("failed to delete channels for supplier: supplier_id=%d, error=%v", id, err))
 	}
 	return DB.Delete(&Supplier{}, "id = ?", id).Error
 }
