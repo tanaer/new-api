@@ -34,7 +34,7 @@ import {
 } from '@douyinfe/semi-illustrations';
 import { Coins } from 'lucide-react';
 import { IconSearch } from '@douyinfe/semi-icons';
-import { API, timestamp2string } from '../../../helpers';
+import { API, timestamp2string, getPaymentMethodName } from '../../../helpers';
 import { isAdmin } from '../../../helpers/utils';
 import { useIsMobile } from '../../../hooks/common/useIsMobile';
 
@@ -47,15 +47,7 @@ const STATUS_CONFIG = {
   expired: { type: 'danger', key: '已过期' },
 };
 
-// 支付方式映射
-const PAYMENT_METHOD_MAP = {
-  stripe: 'Stripe',
-  creem: 'Creem',
-  alipay: '支付宝',
-  wxpay: '微信',
-};
-
-const TopupHistoryModal = ({ visible, onCancel, t }) => {
+const TopupHistoryModal = ({ visible, onCancel, t, payMethods = [] }) => {
   const [loading, setLoading] = useState(false);
   const [topups, setTopups] = useState([]);
   const [total, setTotal] = useState(0);
@@ -148,7 +140,7 @@ const TopupHistoryModal = ({ visible, onCancel, t }) => {
 
   // 渲染支付方式
   const renderPaymentMethod = (pm) => {
-    const displayName = PAYMENT_METHOD_MAP[pm];
+    const displayName = getPaymentMethodName(pm, payMethods);
     return <Text>{displayName ? t(displayName) : pm || '-'}</Text>;
   };
 
@@ -237,7 +229,7 @@ const TopupHistoryModal = ({ visible, onCancel, t }) => {
     });
 
     return baseColumns;
-  }, [t, userIsAdmin]);
+  }, [t, userIsAdmin, payMethods]);
 
   return (
     <Modal

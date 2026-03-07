@@ -30,7 +30,7 @@ import {
   Tooltip,
   Typography,
 } from '@douyinfe/semi-ui';
-import { API, showError, showSuccess, renderQuota } from '../../helpers';
+import { API, showError, showSuccess, renderQuota, isPaymentMethodInScope } from '../../helpers';
 import { getCurrencyConfig } from '../../helpers/render';
 import { RefreshCw, Sparkles } from 'lucide-react';
 import SubscriptionPurchaseModal from './modals/SubscriptionPurchaseModal';
@@ -44,7 +44,13 @@ const { Text } = Typography;
 // 过滤易支付方式
 function getEpayMethods(payMethods = []) {
   return (payMethods || []).filter(
-    (m) => m?.type && m.type !== 'stripe' && m.type !== 'creem',
+    (m) =>
+      m?.type &&
+      m.enabled !== false &&
+      m.type !== 'stripe' &&
+      m.type !== 'creem' &&
+      m.type !== 'bepusdt' &&
+      isPaymentMethodInScope(m, 'subscription'),
   );
 }
 
@@ -77,6 +83,7 @@ const SubscriptionPlansCard = ({
   enableOnlineTopUp = false,
   enableStripeTopUp = false,
   enableCreemTopUp = false,
+  payMethodNameMap = {},
   billingPreference,
   onChangeBillingPreference,
   activeSubscriptions = [],
@@ -176,12 +183,31 @@ const SubscriptionPlansCard = ({
     }
     setPaying(true);
     try {
-      const res = await API.post('/api/subscription/epay/pay', {
+      const endpoint = selectedEpayMethod.startsWith('futoon_')
+        ? '/api/subscription/futoon/pay'
+        : '/api/subscription/epay/pay';
+      const res = await API.post(endpoint, {
         plan_id: selectedPlan.plan.id,
         payment_method: selectedEpayMethod,
       });
       if (res.data?.message === 'success') {
-        submitEpayForm({ url: res.data.url, params: res.data.data });
+        if (selectedEpayMethod.startsWith('futoon_')) {
+          const targetUrl =
+            res.data?.data?.url ||
+            res.data?.data?.payment_url ||
+            res.data?.data?.pay_url ||
+            res.data?.data?.payurl ||
+            res.data?.data?.qrcode ||
+            res.data?.data?.qr_code ||
+            res.data?.url;
+          if (!targetUrl) {
+            showError(t('支付链接获取失败'));
+            return;
+          }
+          window.open(targetUrl, '_blank');
+        } else {
+          submitEpayForm({ url: res.data.url, params: res.data.data });
+        }
         showSuccess(t('已发起支付'));
         closeBuy();
       } else {
@@ -665,6 +691,7 @@ const SubscriptionPlansCard = ({
         enableOnlineTopUp={enableOnlineTopUp}
         enableStripeTopUp={enableStripeTopUp}
         enableCreemTopUp={enableCreemTopUp}
+        payMethodNameMap={payMethodNameMap}
         purchaseLimitInfo={
           selectedPlan?.plan?.id
             ? {

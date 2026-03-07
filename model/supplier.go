@@ -32,8 +32,9 @@ type SupplierGroup struct {
 	LocalGroup    string  `json:"local_group" gorm:"type:varchar(64);default:''"`
 	GroupRatio    float64 `json:"group_ratio" gorm:"default:1.0"`
 	// 新增字段
-	SupportedModels string `json:"supported_models" gorm:"type:text"` // 该分组支持的模型列表，逗号分隔
+	SupportedModels string `json:"supported_models" gorm:"type:text"`                      // 该分组支持的模型列表，逗号分隔
 	EndpointType    string `json:"endpoint_type" gorm:"type:varchar(32);default:'openai'"` // 通道类型
+	EndpointTypes   string `json:"endpoint_types" gorm:"type:text"`                        // 支持的端点类型列表，JSON 数组
 	Status          int    `json:"status" gorm:"default:1"`
 }
 

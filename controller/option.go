@@ -1,8 +1,6 @@
 package controller
 
 import (
-	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -47,9 +45,36 @@ type OptionUpdateRequest struct {
 	Value any    `json:"value"`
 }
 
+func normalizeOptionValue(value any) (string, error) {
+	switch typed := value.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return typed, nil
+	case bool:
+		return common.Interface2String(typed), nil
+	case float64:
+		return common.Interface2String(typed), nil
+	case float32:
+		return common.Interface2String(float64(typed)), nil
+	case int:
+		return common.Interface2String(typed), nil
+	case int64:
+		return common.Interface2String(typed), nil
+	case int32:
+		return common.Interface2String(int(typed)), nil
+	default:
+		jsonBytes, err := common.Marshal(typed)
+		if err != nil {
+			return "", err
+		}
+		return string(jsonBytes), nil
+	}
+}
+
 func UpdateOption(c *gin.Context) {
 	var option OptionUpdateRequest
-	err := json.NewDecoder(c.Request.Body).Decode(&option)
+	err := common.DecodeJson(c.Request.Body, &option)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"success": false,
@@ -57,17 +82,26 @@ func UpdateOption(c *gin.Context) {
 		})
 		return
 	}
-	switch option.Value.(type) {
-	case bool:
-		option.Value = common.Interface2String(option.Value.(bool))
-	case float64:
-		option.Value = common.Interface2String(option.Value.(float64))
-	case int:
-		option.Value = common.Interface2String(option.Value.(int))
-	default:
-		option.Value = fmt.Sprintf("%v", option.Value)
+	value, err := normalizeOptionValue(option.Value)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"message": "无效的参数",
+		})
+		return
 	}
+	option.Value = value
+	trimmedValue := strings.TrimSpace(option.Value.(string))
 	switch option.Key {
+	case "EpayKey", "BepusdtApiToken", "FutoonKey":
+		if trimmedValue == "" {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "敏感配置不能为空",
+			})
+			return
+		}
+		option.Value = trimmedValue
 	case "GitHubOAuthEnabled":
 		if option.Value == "true" && common.GitHubClientId == "" {
 			c.JSON(http.StatusOK, gin.H{

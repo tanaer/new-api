@@ -58,6 +58,7 @@ const RechargeCard = ({
   enableStripeTopUp,
   enableCreemTopUp,
   enableBepusdtTopUp,
+  enableFutoonTopUp,
   creemProducts,
   creemPreTopUp,
   presetAmounts,
@@ -69,6 +70,7 @@ const RechargeCard = ({
   minTopUp,
   renderQuotaWithAmount,
   getAmount,
+  getAmountByPaymentMethod,
   setTopUpCount,
   setSelectedPreset,
   renderAmount,
@@ -100,6 +102,12 @@ const RechargeCard = ({
   const redeemFormApiRef = useRef(null);
   const initialTabSetRef = useRef(false);
   const showAmountSkeleton = useMinimumLoadingTime(amountLoading);
+  const topupPayMethods = (payMethods || []).filter((method) => {
+    if (!method?.scope || method.scope === 'all') {
+      return true;
+    }
+    return method.scope === 'topup';
+  });
   const [activeTab, setActiveTab] = useState('topup');
   const shouldShowSubscription =
     !subscriptionLoading && subscriptionPlans.length > 0;
@@ -225,19 +233,24 @@ const RechargeCard = ({
           <div className='py-8 flex justify-center'>
             <Spin size='large' />
           </div>
-        ) : enableOnlineTopUp || enableStripeTopUp || enableCreemTopUp || enableBepusdtTopUp ? (
+        ) : enableOnlineTopUp || enableStripeTopUp || enableCreemTopUp || enableBepusdtTopUp || enableFutoonTopUp ? (
           <Form
             getFormApi={(api) => (onlineFormApiRef.current = api)}
             initValues={{ topUpCount: topUpCount }}
           >
             <div className='space-y-6'>
-              {(enableOnlineTopUp || enableStripeTopUp) && (
+              {(enableOnlineTopUp || enableStripeTopUp || enableBepusdtTopUp || enableFutoonTopUp) && (
                 <Row gutter={12}>
                   <Col xs={24} sm={24} md={24} lg={10} xl={10}>
                     <Form.InputNumber
                       field='topUpCount'
                       label={t('充值数量')}
-                      disabled={!enableOnlineTopUp && !enableStripeTopUp}
+                      disabled={
+                        !enableOnlineTopUp &&
+                        !enableStripeTopUp &&
+                        !enableBepusdtTopUp &&
+                        !enableFutoonTopUp
+                      }
                       placeholder={
                         t('充值数量，最低 ') + renderQuotaWithAmount(minTopUp)
                       }
@@ -250,14 +263,15 @@ const RechargeCard = ({
                         if (value && value >= 1) {
                           setTopUpCount(value);
                           setSelectedPreset(null);
-                          await getAmount(value);
+                          await getAmountByPaymentMethod(payWay, value);
                         }
                       }}
                       onBlur={(e) => {
                         const value = parseInt(e.target.value);
-                        if (!value || value < 1) {
-                          setTopUpCount(1);
-                          getAmount(1);
+                        const fallbackValue = Math.max(Number(minTopUp) || 1, 1);
+                        if (!value || value < fallbackValue) {
+                          setTopUpCount(fallbackValue);
+                          getAmountByPaymentMethod(payWay, fallbackValue);
                         }
                       }}
                       formatter={(value) => (value ? `${value}` : '')}
@@ -291,14 +305,18 @@ const RechargeCard = ({
                   </Col>
                   <Col xs={24} sm={24} md={24} lg={14} xl={14}>
                     <Form.Slot label={t('选择支付方式')}>
-                      {payMethods && payMethods.length > 0 ? (
+                      {topupPayMethods.length > 0 ? (
                         <Space wrap>
-                          {payMethods.map((payMethod) => {
+                          {topupPayMethods.map((payMethod) => {
                             const minTopupVal = Number(payMethod.min_topup) || 0;
                             const isStripe = payMethod.type === 'stripe';
+                            const isBepusdt = payMethod.type === 'bepusdt';
+                            const isFutoon = payMethod.type?.startsWith('futoon_');
                             const disabled =
-                              (!enableOnlineTopUp && !isStripe) ||
+                              (!enableOnlineTopUp && !isStripe && !isBepusdt && !isFutoon) ||
                               (!enableStripeTopUp && isStripe) ||
+                              (!enableBepusdtTopUp && isBepusdt) ||
+                              (!enableFutoonTopUp && isFutoon) ||
                               minTopupVal > Number(topUpCount || 0);
 
                             const buttonEl = (
@@ -315,6 +333,10 @@ const RechargeCard = ({
                                   payMethod.type === 'alipay' ? (
                                     <SiAlipay size={18} color='#1677FF' />
                                   ) : payMethod.type === 'wxpay' ? (
+                                    <SiWechat size={18} color='#07C160' />
+                                  ) : payMethod.type === 'futoon_alipay' ? (
+                                    <SiAlipay size={18} color='#1677FF' />
+                                  ) : payMethod.type === 'futoon_wxpay' ? (
                                     <SiWechat size={18} color='#07C160' />
                                   ) : payMethod.type === 'stripe' ? (
                                     <SiStripe size={18} color='#635BFF' />
@@ -363,7 +385,7 @@ const RechargeCard = ({
                 </Row>
               )}
 
-              {(enableOnlineTopUp || enableStripeTopUp) && (
+              {(enableOnlineTopUp || enableStripeTopUp || enableBepusdtTopUp || enableFutoonTopUp) && (
                 <Form.Slot
                   label={
                     <div className='flex items-center gap-2'>
@@ -439,12 +461,13 @@ const RechargeCard = ({
                             width: '100%',
                           }}
                           bodyStyle={{ padding: '12px' }}
-                          onClick={() => {
+                          onClick={async () => {
                             selectPresetAmount(preset);
                             onlineFormApiRef.current?.setValue(
                               'topUpCount',
                               preset.value,
                             );
+                            await getAmountByPaymentMethod(payWay, preset.value);
                           }}
                         >
                           <div style={{ textAlign: 'center' }}>
@@ -623,6 +646,10 @@ const RechargeCard = ({
                 enableOnlineTopUp={enableOnlineTopUp}
                 enableStripeTopUp={enableStripeTopUp}
                 enableCreemTopUp={enableCreemTopUp}
+                payMethodNameMap={payMethods.reduce((acc, method) => {
+                  acc[method.type] = method.name;
+                  return acc;
+                }, {})}
                 billingPreference={billingPreference}
                 onChangeBillingPreference={onChangeBillingPreference}
                 activeSubscriptions={activeSubscriptions}

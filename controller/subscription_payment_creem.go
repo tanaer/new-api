@@ -48,6 +48,10 @@ func SubscriptionRequestCreemPay(c *gin.Context) {
 		common.ApiErrorMsg(c, "该套餐未配置 CreemProductId")
 		return
 	}
+	if !operation_setting.IsPaymentMethodAvailable(PaymentMethodCreem, operation_setting.PaymentSceneSubscription) {
+		common.ApiErrorMsg(c, "Creem 未启用")
+		return
+	}
 	if setting.CreemWebhookSecret == "" && !setting.CreemTestMode {
 		common.ApiErrorMsg(c, "Creem Webhook 未配置")
 		return

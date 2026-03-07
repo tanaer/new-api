@@ -67,6 +67,7 @@ const TopUp = () => {
   const [creemProducts, setCreemProducts] = useState([]);
   const [enableCreemTopUp, setEnableCreemTopUp] = useState(false);
   const [enableBepusdtTopUp, setEnableBepusdtTopUp] = useState(false);
+  const [enableFutoonTopUp, setEnableFutoonTopUp] = useState(false);
   const [creemOpen, setCreemOpen] = useState(false);
   const [selectedCreemProduct, setSelectedCreemProduct] = useState(null);
 
@@ -151,14 +152,30 @@ const TopUp = () => {
   };
 
   const preTopUp = async (payment) => {
-    if (payment === 'stripe' || payment === 'bepusdt') {
-      if (payment === 'stripe' && !enableStripeTopUp) {
+    const targetMethod = payMethods.find((method) => method.type === payment);
+    if (
+      targetMethod &&
+      targetMethod.scope &&
+      targetMethod.scope !== 'all' &&
+      targetMethod.scope !== 'topup'
+    ) {
+      showError(t('该支付通道当前不支持额度充值'));
+      return;
+    }
+
+    if (payment === 'stripe') {
+      if (!enableStripeTopUp) {
         showError(t('管理员未开启Stripe充值！'));
         return;
       }
     } else if (payment === 'bepusdt') {
       if (!enableBepusdtTopUp) {
         showError(t('管理员未开启USDT充值！'));
+        return;
+      }
+    } else if (payment.startsWith('futoon_')) {
+      if (!enableFutoonTopUp) {
+        showError(t('管理员未开启富通支付！'));
         return;
       }
     } else {
@@ -171,11 +188,7 @@ const TopUp = () => {
     setPayWay(payment);
     setPaymentLoading(true);
     try {
-      if (payment === 'stripe' || payment === 'bepusdt') {
-        await getStripeAmount();
-      } else {
-        await getAmount();
-      }
+      await getAmountByPaymentMethod(payment);
 
       if (topUpCount < minTopUp) {
         showError(t('充值数量不能小于') + minTopUp);
@@ -190,16 +203,8 @@ const TopUp = () => {
   };
 
   const onlineTopUp = async () => {
-    if (payWay === 'stripe' || payWay === 'bepusdt') {
-      // Stripe 支付处理
-      if (amount === 0) {
-        await getStripeAmount();
-      }
-    } else {
-      // 普通支付处理
-      if (amount === 0) {
-        await getAmount();
-      }
+    if (amount === 0) {
+      await getAmountByPaymentMethod(payWay);
     }
 
     if (topUpCount < minTopUp) {
@@ -221,6 +226,12 @@ const TopUp = () => {
           amount: parseInt(topUpCount),
           payment_method: 'bepusdt',
         });
+      } else if (payWay.startsWith('futoon_')) {
+        // 富通支付请求
+        res = await API.post('/api/user/futoon/pay', {
+          amount: parseInt(topUpCount),
+          payment_method: payWay,
+        });
       } else {
         // 普通支付请求
         res = await API.post('/api/user/pay', {
@@ -236,8 +247,26 @@ const TopUp = () => {
             // Stripe 支付回调处理
             window.open(data.pay_link, '_blank');
           } else if (payWay === 'bepusdt') {
-            // Bepusdt 支付回调处理
-            window.open(data.url || data.payment_url, '_blank');
+            const targetUrl = data.url || data.payment_url;
+            if (!targetUrl || targetUrl === 'about:blank') {
+              showError(t('支付链接获取失败'));
+              return;
+            }
+            window.open(targetUrl, '_blank');
+          } else if (payWay.startsWith('futoon_')) {
+            const targetUrl =
+              data.url ||
+              data.payment_url ||
+              data.pay_url ||
+              data.payurl ||
+              data.qrcode ||
+              data.qr_code ||
+              res.data.url;
+            if (!targetUrl) {
+              showError(t('支付链接获取失败'));
+              return;
+            }
+            window.open(targetUrl, '_blank');
           } else {
             // 普通支付表单提交
             let params = data;
@@ -409,13 +438,23 @@ const TopUp = () => {
         // 处理支付方式
         let payMethods = data.pay_methods || [];
         try {
+          const bepusdtEnabled = data.enable_bepusdt_topup || false;
           if (typeof payMethods === 'string') {
             payMethods = JSON.parse(payMethods);
           }
           if (payMethods && payMethods.length > 0) {
-            // 检查name和type是否为空
+            // 检查 name/type 是否有效，并显式过滤禁用通道
             payMethods = payMethods.filter((method) => {
-              return method.name && method.type;
+              if (!method?.name || !method?.type) {
+                return false;
+              }
+              if (typeof method.enabled === 'boolean') {
+                return method.enabled;
+              }
+              if (typeof method.enabled === 'string') {
+                return method.enabled.toLowerCase() !== 'false';
+              }
+              return true;
             });
             // 如果没有color，则设置默认颜色
             payMethods = payMethods.map((method) => {
@@ -441,6 +480,10 @@ const TopUp = () => {
                   method.color = 'rgba(var(--semi-blue-5), 1)';
                 } else if (method.type === 'wxpay') {
                   method.color = 'rgba(var(--semi-green-5), 1)';
+                } else if (method.type === 'futoon_alipay') {
+                  method.color = 'rgba(var(--semi-blue-5), 1)';
+                } else if (method.type === 'futoon_wxpay') {
+                  method.color = 'rgba(var(--semi-green-5), 1)';
                 } else if (method.type === 'stripe') {
                   method.color = 'rgba(var(--semi-purple-5), 1)';
                 } else {
@@ -457,13 +500,16 @@ const TopUp = () => {
           // 这个逻辑现在由后端处理，如果 Stripe 启用，后端会在 pay_methods 中包含它
 
           // 如果启用了 Bepusdt 支付，添加到支付方法列表
-          if (enableBepusdtTopUp) {
+          if (bepusdtEnabled) {
             const hasBepusdt = payMethods.some((method) => method.type === 'bepusdt');
             if (!hasBepusdt) {
               payMethods.push({
                 name: 'USDT支付',
                 type: 'bepusdt',
                 color: 'rgba(38, 161, 123, 1)',
+                enabled: true,
+                min_topup: Number(data.bepusdt_min_payment_amount) || Number(data.min_topup) || 0,
+                scope: 'topup',
               });
             }
           }
@@ -472,23 +518,26 @@ const TopUp = () => {
           const enableStripeTopUp = data.enable_stripe_topup || false;
           const enableOnlineTopUp = data.enable_online_topup || false;
           const enableCreemTopUp = data.enable_creem_topup || false;
+          const enableFutoonTopUp = data.enable_futoon_topup || false;
+          const topupMinUp = Number(data.min_topup) || 0;
+          const stripeMinTopup = Number(data.stripe_min_topup) || 0;
           const minTopUpValue = enableOnlineTopUp
-            ? data.min_topup
-            : enableStripeTopUp
-              ? data.stripe_min_topup
-              : 1;
+            ? topupMinUp || 1
+            : enableFutoonTopUp || bepusdtEnabled
+              ? topupMinUp || 1
+              : enableStripeTopUp
+                ? stripeMinTopup || 1
+                : 1;
           setEnableOnlineTopUp(enableOnlineTopUp);
           setEnableStripeTopUp(enableStripeTopUp);
           setEnableCreemTopUp(enableCreemTopUp);
-          const enableBepusdtTopUp = data.enable_bepusdt_topup || false;
-          setEnableBepusdtTopUp(enableBepusdtTopUp);
+          setEnableBepusdtTopUp(bepusdtEnabled);
+          setEnableFutoonTopUp(enableFutoonTopUp);
           setMinTopUp(minTopUpValue);
           setTopUpCount(minTopUpValue);
 
           // 设置 Creem 产品
           try {
-            console.log(' data is ?', data);
-            console.log(' creem products is ?', data.creem_products);
             const products = JSON.parse(data.creem_products || '[]');
             setCreemProducts(products);
           } catch (e) {
@@ -501,7 +550,19 @@ const TopUp = () => {
           }
 
           // 初始化显示实付金额
-          getAmount(minTopUpValue);
+          const defaultPayMethod = payMethods.find((method) => {
+            if (method.type === 'stripe') {
+              return enableStripeTopUp;
+            }
+            if (method.type === 'bepusdt') {
+              return bepusdtEnabled;
+            }
+            if (method.type?.startsWith('futoon_')) {
+              return enableFutoonTopUp;
+            }
+            return enableOnlineTopUp;
+          });
+          getAmountByPaymentMethod(defaultPayMethod?.type, minTopUpValue);
         } catch (e) {
           console.log('解析支付方式失败:', e);
           setPayMethods([]);
@@ -593,6 +654,13 @@ const TopUp = () => {
 
   const renderAmount = () => {
     return amount + ' ' + t('元');
+  };
+
+  const getAmountByPaymentMethod = async (paymentMethod, value) => {
+    if (paymentMethod === 'stripe') {
+      return await getStripeAmount(value);
+    }
+    return await getAmount(value);
   };
 
   const getAmount = async (value) => {
@@ -730,6 +798,7 @@ const TopUp = () => {
         visible={openHistory}
         onCancel={handleHistoryCancel}
         t={t}
+        payMethods={payMethods}
       />
 
       {/* Creem 充值确认模态框 */}
@@ -768,6 +837,7 @@ const TopUp = () => {
           enableStripeTopUp={enableStripeTopUp}
           enableCreemTopUp={enableCreemTopUp}
           enableBepusdtTopUp={enableBepusdtTopUp}
+          enableFutoonTopUp={enableFutoonTopUp}
           creemProducts={creemProducts}
           creemPreTopUp={creemPreTopUp}
           presetAmounts={presetAmounts}
@@ -779,6 +849,7 @@ const TopUp = () => {
           minTopUp={minTopUp}
           renderQuotaWithAmount={renderQuotaWithAmount}
           getAmount={getAmount}
+          getAmountByPaymentMethod={getAmountByPaymentMethod}
           setTopUpCount={setTopUpCount}
           setSelectedPreset={setSelectedPreset}
           renderAmount={renderAmount}

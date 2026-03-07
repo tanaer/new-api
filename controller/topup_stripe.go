@@ -66,7 +66,7 @@ func (*StripeAdaptor) RequestAmount(c *gin.Context, req *StripePayRequest) {
 }
 
 func (*StripeAdaptor) RequestPay(c *gin.Context, req *StripePayRequest) {
-	if req.PaymentMethod != PaymentMethodStripe {
+	if req.PaymentMethod != PaymentMethodStripe || !operation_setting.IsPaymentMethodAvailable(PaymentMethodStripe, operation_setting.PaymentSceneTopup) {
 		c.JSON(200, gin.H{"message": "error", "data": "不支持的支付渠道"})
 		return
 	}

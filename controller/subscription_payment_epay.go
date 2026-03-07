@@ -42,8 +42,8 @@ func SubscriptionRequestEpay(c *gin.Context) {
 		common.ApiErrorMsg(c, "套餐金额过低")
 		return
 	}
-	if !operation_setting.ContainsPayMethod(req.PaymentMethod) {
-		common.ApiErrorMsg(c, "支付方式不存在")
+	if !operation_setting.IsPaymentMethodAvailable(req.PaymentMethod, operation_setting.PaymentSceneSubscription) || !operation_setting.IsEpayMethodType(req.PaymentMethod) {
+		common.ApiErrorMsg(c, "支付方式未启用")
 		return
 	}
 

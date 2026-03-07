@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/performance_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
+	"gorm.io/gorm"
 )
 
 type Option struct {
@@ -79,6 +80,12 @@ func InitOptionMap() {
 	common.OptionMap["Price"] = strconv.FormatFloat(operation_setting.Price, 'f', -1, 64)
 	common.OptionMap["USDExchangeRate"] = strconv.FormatFloat(operation_setting.USDExchangeRate, 'f', -1, 64)
 	common.OptionMap["MinTopUp"] = strconv.Itoa(operation_setting.MinTopUp)
+	common.OptionMap["BepusdtApiUrl"] = operation_setting.BepusdtApiUrl
+	common.OptionMap["BepusdtApiToken"] = operation_setting.BepusdtApiToken
+	common.OptionMap["BepusdtTradeType"] = operation_setting.BepusdtTradeType
+	common.OptionMap["BepusdtFiat"] = operation_setting.BepusdtFiat
+	common.OptionMap["BepusdtTimeout"] = strconv.Itoa(operation_setting.BepusdtTimeout)
+	common.OptionMap["BepusdtMinPaymentAmount"] = strconv.FormatFloat(operation_setting.BepusdtMinPaymentAmount, 'f', -1, 64)
 	common.OptionMap["StripeMinTopUp"] = strconv.Itoa(setting.StripeMinTopUp)
 	common.OptionMap["StripeApiSecret"] = setting.StripeApiSecret
 	common.OptionMap["StripeWebhookSecret"] = setting.StripeWebhookSecret
@@ -89,6 +96,12 @@ func InitOptionMap() {
 	common.OptionMap["CreemProducts"] = setting.CreemProducts
 	common.OptionMap["CreemTestMode"] = strconv.FormatBool(setting.CreemTestMode)
 	common.OptionMap["CreemWebhookSecret"] = setting.CreemWebhookSecret
+	common.OptionMap["FutoonApiUrl"] = setting.FutoonApiUrl
+	common.OptionMap["FutoonPid"] = setting.FutoonPid
+	common.OptionMap["FutoonKey"] = setting.FutoonKey
+	common.OptionMap["FutoonNotifyURL"] = setting.FutoonNotifyURL
+	common.OptionMap["FutoonReturnURL"] = setting.FutoonReturnURL
+	common.OptionMap["FutoonDefaultDevice"] = setting.FutoonDefaultDevice
 	common.OptionMap["TopupGroupRatio"] = common.TopupGroupRatio2JSONString()
 	common.OptionMap["Chats"] = setting.Chats2JsonString()
 	common.OptionMap["AutoGroups"] = setting.AutoGroups2JsonString()
@@ -178,19 +191,38 @@ func SyncOptions(frequency int) {
 }
 
 func UpdateOption(key string, value string) error {
-	// Save to database first
-	option := Option{
-		Key: key,
+	common.OptionMapRWMutex.RLock()
+	oldValue, hasOldValue := common.OptionMap[key]
+	common.OptionMapRWMutex.RUnlock()
+
+	restoreOptionState := func() {
+		if hasOldValue {
+			_ = updateOptionMap(key, oldValue)
+			return
+		}
+		common.OptionMapRWMutex.Lock()
+		delete(common.OptionMap, key)
+		common.OptionMapRWMutex.Unlock()
 	}
-	// https://gorm.io/docs/update.html#Save-All-Fields
-	DB.FirstOrCreate(&option, Option{Key: key})
-	option.Value = value
-	// Save is a combination function.
-	// If save value does not contain primary key, it will execute Create,
-	// otherwise it will execute Update (with all fields).
-	DB.Save(&option)
-	// Update OptionMap
-	return updateOptionMap(key, value)
+
+	if err := updateOptionMap(key, value); err != nil {
+		restoreOptionState()
+		return err
+	}
+
+	return DB.Transaction(func(tx *gorm.DB) error {
+		option := Option{Key: key}
+		if err := tx.FirstOrCreate(&option, Option{Key: key}).Error; err != nil {
+			restoreOptionState()
+			return err
+		}
+		option.Value = value
+		if err := tx.Save(&option).Error; err != nil {
+			restoreOptionState()
+			return err
+		}
+		return nil
+	})
 }
 
 func updateOptionMap(key string, value string) (err error) {
@@ -338,6 +370,18 @@ func updateOptionMap(key string, value string) (err error) {
 		operation_setting.USDExchangeRate, _ = strconv.ParseFloat(value, 64)
 	case "MinTopUp":
 		operation_setting.MinTopUp, _ = strconv.Atoi(value)
+	case "BepusdtApiUrl":
+		operation_setting.BepusdtApiUrl = value
+	case "BepusdtApiToken":
+		operation_setting.BepusdtApiToken = value
+	case "BepusdtTradeType":
+		operation_setting.BepusdtTradeType = value
+	case "BepusdtFiat":
+		operation_setting.BepusdtFiat = value
+	case "BepusdtTimeout":
+		operation_setting.BepusdtTimeout, _ = strconv.Atoi(value)
+	case "BepusdtMinPaymentAmount":
+		operation_setting.BepusdtMinPaymentAmount, _ = strconv.ParseFloat(value, 64)
 	case "StripeApiSecret":
 		setting.StripeApiSecret = value
 	case "StripeWebhookSecret":
@@ -358,6 +402,18 @@ func updateOptionMap(key string, value string) (err error) {
 		setting.CreemTestMode = value == "true"
 	case "CreemWebhookSecret":
 		setting.CreemWebhookSecret = value
+	case "FutoonApiUrl":
+		setting.FutoonApiUrl = value
+	case "FutoonPid":
+		setting.FutoonPid = value
+	case "FutoonKey":
+		setting.FutoonKey = value
+	case "FutoonNotifyURL":
+		setting.FutoonNotifyURL = value
+	case "FutoonReturnURL":
+		setting.FutoonReturnURL = value
+	case "FutoonDefaultDevice":
+		setting.FutoonDefaultDevice = value
 	case "TopupGroupRatio":
 		err = common.UpdateTopupGroupRatioByJSONString(value)
 	case "GitHubClientId":

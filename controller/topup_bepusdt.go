@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -20,6 +21,17 @@ import (
 type BepusdtPayRequest struct {
 	Amount        int64  `json:"amount"`
 	PaymentMethod string `json:"payment_method"` // 用于兼容，实际使用 trade_type
+}
+
+func expireBepusdtTopUp(topUp *model.TopUp) {
+	if topUp == nil || topUp.Status != common.TopUpStatusPending {
+		return
+	}
+	topUp.Status = common.TopUpStatusExpired
+	topUp.CompleteTime = common.GetTimestamp()
+	if err := topUp.Update(); err != nil {
+		log.Printf("Bepusdt 订单过期更新失败: %v", err)
+	}
 }
 
 // RequestBepusdt 发起 Bepusdt 支付
@@ -43,13 +55,18 @@ func RequestBepusdt(c *gin.Context) {
 	}
 
 	payMoney := getPayMoney(req.Amount, group)
+	minPayAmount := operation_setting.BepusdtMinPaymentAmount
+	if minPayAmount > 0 && payMoney < minPayAmount {
+		c.JSON(200, gin.H{"message": "error", "data": fmt.Sprintf("USDT 支付金额不能低于 %.2f 元", minPayAmount)})
+		return
+	}
 	if payMoney < 0.01 {
 		c.JSON(200, gin.H{"message": "error", "data": "充值金额过低"})
 		return
 	}
 
-	if !service.IsBepusdtEnabled() {
-		c.JSON(200, gin.H{"message": "error", "data": "当前管理员未配置 Bepusdt 支付信息"})
+	if !operation_setting.IsPaymentMethodAvailable("bepusdt", operation_setting.PaymentSceneTopup) || !service.IsBepusdtEnabled() {
+		c.JSON(200, gin.H{"message": "error", "data": "当前管理员未配置或未启用 Bepusdt 支付信息"})
 		return
 	}
 
@@ -75,7 +92,7 @@ func RequestBepusdt(c *gin.Context) {
 		TradeNo:       tradeNo,
 		PaymentMethod: "bepusdt",
 		CreateTime:    time.Now().Unix(),
-		Status:        "pending",
+		Status:        common.TopUpStatusPending,
 	}
 	if err := topUp.Insert(); err != nil {
 		c.JSON(200, gin.H{"message": "error", "data": "创建订单失败"})
@@ -96,13 +113,23 @@ func RequestBepusdt(c *gin.Context) {
 	})
 	if err != nil {
 		log.Printf("Bepusdt 创建交易失败: %v", err)
+		expireBepusdtTopUp(topUp)
 		c.JSON(200, gin.H{"message": "error", "data": "创建支付订单失败"})
 		return
 	}
 
 	if resp.StatusCode != 200 {
 		log.Printf("Bepusdt 创建交易失败: %s", resp.Message)
+		expireBepusdtTopUp(topUp)
 		c.JSON(200, gin.H{"message": "error", "data": resp.Message})
+		return
+	}
+
+	paymentURL := strings.TrimSpace(resp.Data.PaymentUrl)
+	if paymentURL == "" || strings.EqualFold(paymentURL, "about:blank") {
+		log.Printf("Bepusdt 创建交易返回空支付链接: order_id=%s", tradeNo)
+		expireBepusdtTopUp(topUp)
+		c.JSON(200, gin.H{"message": "error", "data": "支付链接获取失败"})
 		return
 	}
 
@@ -115,33 +142,41 @@ func RequestBepusdt(c *gin.Context) {
 			"actual_amount":   resp.Data.ActualAmount,
 			"token":           resp.Data.Token,
 			"expiration_time": resp.Data.ExpirationTime,
-			"payment_url":     resp.Data.PaymentUrl,
+			"payment_url":     paymentURL,
 		},
-		"url": resp.Data.PaymentUrl,
+		"url": paymentURL,
 	})
 }
 
 // BepusdtNotify 处理 Bepusdt 回调
 func BepusdtNotify(c *gin.Context) {
 	var req service.BepusdtNotifyRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	body, err := c.GetRawData()
+	if err != nil {
+		log.Printf("Bepusdt 回调读取失败: %v", err)
+		c.String(200, "fail")
+		return
+	}
+	if err := common.Unmarshal(body, &req); err != nil {
 		log.Printf("Bepusdt 回调解析失败: %v", err)
 		c.String(200, "fail")
 		return
 	}
 
-	log.Printf("Bepusdt 回调: trade_id=%s, order_id=%s, status=%d, amount=%f", 
-		req.TradeId, req.OrderId, req.Status, req.Amount)
+	log.Printf("Bepusdt 回调: trade_id=%s, order_id=%s, status=%d, amount=%f, actual_amount=%s",
+		req.TradeId, req.OrderId, req.Status, req.Amount, req.ActualAmount)
+
+	actualAmount := strings.TrimSpace(req.ActualAmount)
 
 	// 验证签名
 	params := map[string]interface{}{
-		"trade_id":              req.TradeId,
-		"order_id":              req.OrderId,
-		"amount":                req.Amount,
-		"actual_amount":         req.ActualAmount,
-		"token":                 req.Token,
-		"block_transaction_id":  req.BlockTransactionId,
-		"status":                req.Status,
+		"trade_id":             req.TradeId,
+		"order_id":             req.OrderId,
+		"amount":               req.Amount,
+		"actual_amount":        actualAmount,
+		"token":                req.Token,
+		"block_transaction_id": req.BlockTransactionId,
+		"status":               req.Status,
 	}
 
 	if !operation_setting.BepusdtVerifySignature(params, req.Signature) {
@@ -174,14 +209,14 @@ func BepusdtNotify(c *gin.Context) {
 		return
 	}
 
-	if topUp.Status != "pending" {
+	if topUp.Status != common.TopUpStatusPending {
 		log.Printf("Bepusdt 回调订单已处理: %s, status=%s", req.OrderId, topUp.Status)
 		c.String(200, "ok")
 		return
 	}
 
 	// 更新订单状态
-	topUp.Status = "success"
+	topUp.Status = common.TopUpStatusSuccess
 	if err := topUp.Update(); err != nil {
 		log.Printf("Bepusdt 回调更新订单失败: %v", err)
 		c.String(200, "fail")
@@ -200,8 +235,8 @@ func BepusdtNotify(c *gin.Context) {
 	}
 
 	log.Printf("Bepusdt 回调成功: user_id=%d, quota=%d", topUp.UserId, quotaToAdd)
-	model.RecordLog(topUp.UserId, model.LogTypeTopup, 
-		fmt.Sprintf("使用 Bepusdt 充值成功，充值金额: %v，支付金额: %.2f，交易ID: %s", 
+	model.RecordLog(topUp.UserId, model.LogTypeTopup,
+		fmt.Sprintf("使用 Bepusdt 充值成功，充值金额: %v，支付金额: %.2f，交易ID: %s",
 			logger.LogQuota(quotaToAdd), topUp.Money, req.TradeId))
 
 	c.String(200, "ok")
@@ -210,7 +245,8 @@ func BepusdtNotify(c *gin.Context) {
 // GetBepusdtPayInfo 获取 Bepusdt 支付信息（用于前端判断是否显示）
 func GetBepusdtPayInfo() gin.H {
 	return gin.H{
-		"enabled":   service.IsBepusdtEnabled(),
-		"trade_type": operation_setting.BepusdtTradeType,
+		"enabled":            service.IsBepusdtEnabled(),
+		"trade_type":         operation_setting.BepusdtTradeType,
+		"min_payment_amount": operation_setting.BepusdtMinPaymentAmount,
 	}
 }

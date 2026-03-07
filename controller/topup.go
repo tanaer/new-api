@@ -23,42 +23,21 @@ import (
 )
 
 func GetTopUpInfo(c *gin.Context) {
-	// 获取支付方式
-	payMethods := operation_setting.PayMethods
-
-	// 如果启用了 Stripe 支付，添加到支付方法列表
-	if setting.StripeApiSecret != "" && setting.StripeWebhookSecret != "" && setting.StripePriceId != "" {
-		// 检查是否已经包含 Stripe
-		hasStripe := false
-		for _, method := range payMethods {
-			if method["type"] == "stripe" {
-				hasStripe = true
-				break
-			}
-		}
-
-		if !hasStripe {
-			stripeMethod := map[string]string{
-				"name":      "Stripe",
-				"type":      "stripe",
-				"color":     "rgba(var(--semi-purple-5), 1)",
-				"min_topup": strconv.Itoa(setting.StripeMinTopUp),
-			}
-			payMethods = append(payMethods, stripeMethod)
-		}
-	}
+	payMethods := getEnabledPayMethodMaps("")
 
 	data := gin.H{
-		"enable_online_topup": operation_setting.PayAddress != "" && operation_setting.EpayId != "" && operation_setting.EpayKey != "",
-		"enable_stripe_topup": setting.StripeApiSecret != "" && setting.StripeWebhookSecret != "" && setting.StripePriceId != "",
-		"enable_creem_topup":  setting.CreemApiKey != "" && setting.CreemProducts != "[]",
-		"enable_bepusdt_topup": operation_setting.IsBepusdtEnabled(),
-		"creem_products":      setting.CreemProducts,
-		"pay_methods":         payMethods,
-		"min_topup":           operation_setting.MinTopUp,
-		"stripe_min_topup":    setting.StripeMinTopUp,
-		"amount_options":      operation_setting.GetPaymentSetting().AmountOptions,
-		"discount":            operation_setting.GetPaymentSetting().AmountDiscount,
+		"enable_online_topup":        operation_setting.IsOnlineTopupEnabled(),
+		"enable_stripe_topup":        operation_setting.IsStripeTopupEnabled(),
+		"enable_creem_topup":         operation_setting.IsCreemTopupEnabled(),
+		"enable_bepusdt_topup":       operation_setting.IsBepusdtTopupEnabled(),
+		"enable_futoon_topup":        operation_setting.IsFutoonTopupEnabled(),
+		"creem_products":             setting.CreemProducts,
+		"pay_methods":                payMethods,
+		"min_topup":                  operation_setting.MinTopUp,
+		"stripe_min_topup":           setting.StripeMinTopUp,
+		"bepusdt_min_payment_amount": operation_setting.BepusdtMinPaymentAmount,
+		"amount_options":             operation_setting.GetPaymentSetting().AmountOptions,
+		"discount":                   operation_setting.GetPaymentSetting().AmountDiscount,
 	}
 	common.ApiSuccess(c, data)
 }
@@ -150,8 +129,8 @@ func RequestEpay(c *gin.Context) {
 		return
 	}
 
-	if !operation_setting.ContainsPayMethod(req.PaymentMethod) {
-		c.JSON(200, gin.H{"message": "error", "data": "支付方式不存在"})
+	if !operation_setting.IsPaymentMethodAvailable(req.PaymentMethod, operation_setting.PaymentSceneTopup) || !operation_setting.IsEpayMethodType(req.PaymentMethod) {
+		c.JSON(200, gin.H{"message": "error", "data": "支付方式未启用"})
 		return
 	}
 

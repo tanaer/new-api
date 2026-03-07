@@ -9,11 +9,12 @@ import (
 )
 
 // Bepusdt 支付配置
-var BepusdtApiUrl = ""            // API 地址，如 https://pay.example.com
-var BepusdtApiToken = ""          // API Token，用于签名
+var BepusdtApiUrl = ""              // API 地址，如 https://pay.example.com
+var BepusdtApiToken = ""            // API Token，用于签名
 var BepusdtTradeType = "usdt.trc20" // 默认交易类型
-var BepusdtFiat = "CNY"           // 法币类型
-var BepusdtTimeout = 600          // 订单超时时间（秒）
+var BepusdtFiat = "CNY"             // 法币类型
+var BepusdtTimeout = 600            // 订单超时时间（秒）
+var BepusdtMinPaymentAmount = 1.0   // 最小支付金额（元）
 
 // IsBepusdtEnabled 检查 Bepusdt 支付是否已配置
 func IsBepusdtEnabled() bool {

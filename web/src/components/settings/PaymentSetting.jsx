@@ -47,6 +47,18 @@ const PaymentSetting = () => {
     StripeUnitPrice: 8.0,
     StripeMinTopUp: 1,
     StripePromotionCodesEnabled: false,
+    FutoonApiUrl: '',
+    FutoonPid: '',
+    FutoonKey: '',
+    FutoonNotifyURL: '',
+    FutoonReturnURL: '',
+    FutoonDefaultDevice: 'pc',
+    BepusdtApiUrl: '',
+    BepusdtApiToken: '',
+    BepusdtTradeType: 'usdt.trc20',
+    BepusdtFiat: 'CNY',
+    BepusdtTimeout: 600,
+    BepusdtMinPaymentAmount: 1,
   });
 
   let [loading, setLoading] = useState(false);
@@ -98,7 +110,11 @@ const PaymentSetting = () => {
           case 'MinTopUp':
           case 'StripeUnitPrice':
           case 'StripeMinTopUp':
+          case 'BepusdtMinPaymentAmount':
             newInputs[item.key] = parseFloat(item.value);
+            break;
+          case 'BepusdtTimeout':
+            newInputs[item.key] = parseInt(item.value, 10);
             break;
           default:
             if (item.key.endsWith('Enabled')) {

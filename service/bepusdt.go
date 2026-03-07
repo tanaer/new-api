@@ -43,11 +43,12 @@ type BepusdtCreateTransactionResponse struct {
 }
 
 // Bepusdt 回调通知
+// 上游实际通知中 amount 为数字，actual_amount 常为字符串，这里保留其原始表示参与验签。
 type BepusdtNotifyRequest struct {
 	TradeId            string  `json:"trade_id"`
 	OrderId            string  `json:"order_id"`
 	Amount             float64 `json:"amount"`
-	ActualAmount       float64 `json:"actual_amount"`
+	ActualAmount       string  `json:"actual_amount"`
 	Token              string  `json:"token"`
 	BlockTransactionId string  `json:"block_transaction_id"`
 	Signature          string  `json:"signature"`

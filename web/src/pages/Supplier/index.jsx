@@ -289,38 +289,69 @@ const SupplierPage = () => {
         }
     };
 
-    // 一键同步（一站式）
+    // 一键更新渠道（一站式）
     const syncFull = async () => {
         if (!currentSupplier) return;
         setSyncingFull(true);
         try {
             const res = await API.post(`${API_BASE}/${currentSupplier.id}/sync_full`);
-            if (res.data.success) {
-                Toast.success(res.data.message);
-                if (res.data.groups) {
-                    setGroups(res.data.groups);
-                }
+            const data = res.data || {};
+            const partial = !!data.partial_success;
+            if (data.success && partial) {
+                Toast.warning(data.message || '更新完成，但有部分问题');
+            } else if (data.success) {
+                Toast.success(data.message);
             } else {
                 Toast.error(res.data.message);
             }
-            
+
+            if (data.groups) {
+                setGroups(data.groups);
+            }
+
             // 处理未映射分组
-            if (Array.isArray(res.data.unmapped_groups) && res.data.unmapped_groups.length > 0) {
-                setUnmappedGroups(res.data.unmapped_groups);
+            if (Array.isArray(data.unmapped_groups) && data.unmapped_groups.length > 0) {
+                setUnmappedGroups(data.unmapped_groups);
             } else {
                 setUnmappedGroups([]);
             }
-            
-            if (Array.isArray(res.data.warnings) && res.data.warnings.length > 0) {
+
+            const hasWarnings = Array.isArray(data.warnings) && data.warnings.length > 0;
+            const hasSteps = Array.isArray(data.steps) && data.steps.length > 0;
+            const shouldShowDetail = hasWarnings || partial || !data.success;
+            if (shouldShowDetail) {
                 Modal.warning({
-                    title: '同步警告',
+                    title: '更新结果详情',
                     content: (
                         <div style={{ maxHeight: 280, overflow: 'auto' }}>
-                            {res.data.warnings.map((msg, idx) => (
-                                <div key={idx} style={{ marginBottom: 6 }}>
-                                    {msg}
+                            {hasSteps && (
+                                <div style={{ marginBottom: 10 }}>
+                                    <Text strong>执行步骤</Text>
+                                    {data.steps.map((step, idx) => (
+                                        <div key={`step-${idx}`} style={{ marginTop: 4 }}>
+                                            <Tag color={step.success ? 'green' : 'red'} style={{ marginRight: 8 }}>
+                                                {step.name}
+                                            </Tag>
+                                            <Text>{step.success ? '成功' : '失败'} · {step.cost_ms || 0}ms</Text>
+                                            {step.message && (
+                                                <div style={{ marginTop: 2 }}>
+                                                    <Text type='tertiary'>{step.message}</Text>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
                                 </div>
-                            ))}
+                            )}
+                            {hasWarnings && (
+                                <>
+                                    <Text strong>警告信息</Text>
+                                    {data.warnings.map((msg, idx) => (
+                                        <div key={`warn-${idx}`} style={{ marginTop: 4 }}>
+                                            {msg}
+                                        </div>
+                                    ))}
+                                </>
+                            )}
                         </div>
                     ),
                 });
@@ -331,22 +362,26 @@ const SupplierPage = () => {
         }
     };
 
-    // 同步所有供应商
+    // 更新所有供应商
     const syncAllFull = async () => {
         setSyncingAllFull(true);
         try {
             const res = await API.post(`${API_BASE}/sync_all_full`);
-            if (res.data.success) {
-                Toast.success(res.data.message);
+            const data = res.data || {};
+            const partial = !!data.partial_success;
+            if (data.success && partial) {
+                Toast.warning(data.message || '批量更新完成，但有部分问题');
+            } else if (data.success) {
+                Toast.success(data.message);
             } else {
                 Toast.error(res.data.message);
             }
-            if (Array.isArray(res.data.warnings) && res.data.warnings.length > 0) {
+            if (Array.isArray(data.warnings) && data.warnings.length > 0) {
                 Modal.warning({
-                    title: '同步警告',
+                    title: '批量更新警告',
                     content: (
                         <div style={{ maxHeight: 280, overflow: 'auto' }}>
-                            {res.data.warnings.map((msg, idx) => (
+                            {data.warnings.map((msg, idx) => (
                                 <div key={idx} style={{ marginBottom: 6 }}>
                                     {msg}
                                 </div>
@@ -590,14 +625,26 @@ const SupplierPage = () => {
     ];
 
     return (
-        <div style={{ padding: 20 }}>
-            <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between' }}>
-                <Space>
+        <div className='mt-[60px] px-2'>
+            <div
+                style={{
+                    marginBottom: 16,
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    flexWrap: 'wrap',
+                    gap: 12,
+                }}
+            >
+                <Space wrap>
+                    <Button icon={<IconPlus />} theme='solid' onClick={() => openEdit()}>
+                        添加供应商
+                    </Button>
                     <Button icon={<IconRefresh />} onClick={loadSuppliers}>
                         刷新
                     </Button>
                 </Space>
-                <Space>
+                <Space wrap style={{ marginLeft: 'auto' }}>
                     <Button
                         theme='solid'
                         type='primary'
@@ -605,7 +652,7 @@ const SupplierPage = () => {
                         loading={syncingAllFull}
                         onClick={syncAllFull}
                     >
-                        一键同步所有供应商
+                        一键更新所有供应商
                     </Button>
                     <Button theme='light' type='warning' onClick={() => setBulkMarkupVisible(true)}>
                         一键设置所有倍率
@@ -673,7 +720,7 @@ const SupplierPage = () => {
                             type='primary'
                             size='large'
                         >
-                            一键同步（推荐）
+                            一键更新渠道（推荐）
                         </Button>
                         <Button icon={<IconSearch />} loading={fetchingGroups} onClick={fetchGroups}>
                             仅采集分组
@@ -716,7 +763,7 @@ const SupplierPage = () => {
                             <div style={{ marginTop: 24 }}>
                                 <Divider margin='12px'>
                                     <Text type='warning' strong>
-                                        未映射分组 ({unmappedGroups.length}个) - 请手动映射后再创建渠道
+                                        未映射分组 ({unmappedGroups.length}个) - 请手动映射后重新执行一键更新
                                     </Text>
                                 </Divider>
                                 
@@ -738,7 +785,7 @@ const SupplierPage = () => {
                                         loading={batchCreating}
                                         onClick={batchCreateChannels}
                                     >
-                                        批量创建选中渠道
+                                        手动创建选中渠道（备用）
                                     </Button>
                                 </div>
                                 
@@ -823,7 +870,7 @@ const SupplierPage = () => {
                         )}
                     </>
                 ) : (
-                    <Banner type='info' description='暂无分组数据，请先采集分组或使用一键同步' />
+                    <Banner type='info' description='暂无分组数据，请先采集分组或使用一键更新渠道' />
                 )}
 
                 {/* 操作说明 */}
@@ -834,18 +881,18 @@ const SupplierPage = () => {
                     <Collapsible.Body>
                         <div style={{ padding: 12, background: 'var(--semi-color-fill-0)', borderRadius: 8 }}>
                             <Text>
-                                <strong>一键同步会自动完成以下操作：</strong><br/>
+                                <strong>一键更新渠道会自动完成以下操作：</strong><br/>
                                 1. 从上游 /api/pricing 采集分组信息（倍率、支持的模型、通道类型）<br/>
                                 2. 自动映射本地分组（根据名称规则：cc→cc开头、codex/openai→codex开头、gemini→gemini开头，找倍率最接近的）<br/>
                                 3. 为每个分组生成/回填 API 密钥<br/>
                                 4. 同步倍率到系统（只同步已映射的本地分组）<br/>
-                                5. 更新已存在的渠道（不自动创建新渠道）<br/>
-                                6. 禁用上游已不存在的渠道<br/><br/>
+                                5. 自动新增或更新本地渠道（根据映射分组）<br/>
+                                6. 硬删除上游已不存在的本地渠道<br/><br/>
                                 <strong>重要：未映射分组处理流程</strong><br/>
                                 1. 如果上游分组无法自动匹配到本地分组，会显示在「未映射分组」列表中<br/>
                                 2. 手动为未映射分组选择对应的本地分组<br/>
-                                3. 勾选需要创建渠道的分组，点击「批量创建选中渠道」<br/><br/>
-                                <strong>建议流程：</strong> 点击「一键同步」→ 检查未映射分组 → 手动映射 → 批量创建渠道
+                                3. 重新点击「一键更新渠道」完成自动对齐<br/><br/>
+                                <strong>建议流程：</strong> 点击「一键更新渠道」→ 检查未映射分组 → 手动映射 → 再次一键更新
                             </Text>
                         </div>
                     </Collapsible.Body>

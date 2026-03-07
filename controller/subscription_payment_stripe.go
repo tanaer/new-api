@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stripe/stripe-go/v81"
@@ -41,8 +42,8 @@ func SubscriptionRequestStripePay(c *gin.Context) {
 		common.ApiErrorMsg(c, "该套餐未配置 StripePriceId")
 		return
 	}
-	if !strings.HasPrefix(setting.StripeApiSecret, "sk_") && !strings.HasPrefix(setting.StripeApiSecret, "rk_") {
-		common.ApiErrorMsg(c, "Stripe 未配置或密钥无效")
+	if !operation_setting.IsPaymentMethodAvailable(PaymentMethodStripe, operation_setting.PaymentSceneSubscription) || (!strings.HasPrefix(setting.StripeApiSecret, "sk_") && !strings.HasPrefix(setting.StripeApiSecret, "rk_")) {
+		common.ApiErrorMsg(c, "Stripe 未配置或未启用")
 		return
 	}
 	if setting.StripeWebhookSecret == "" {
