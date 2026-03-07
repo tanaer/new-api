@@ -30,6 +30,7 @@ const FooterBar = () => {
   const logo = getLogo();
   const [statusState] = useContext(StatusContext);
   const isDemoSiteMode = statusState?.status?.demo_site_enabled || false;
+  const systemLink = statusState?.status?.server_address || window.location.origin;
 
   const loadFooter = () => {
     let footer_html = localStorage.getItem('footer_html');
@@ -200,18 +201,18 @@ const FooterBar = () => {
               {t('设计与开发由')}{' '}
             </span>
             <a
-              href='https://github.com/QuantumNous/new-api'
+              href={systemLink}
               target='_blank'
               rel='noopener noreferrer'
               className='!text-semi-color-primary font-medium'
             >
-              New API
+              {systemName}
             </a>
           </div>
         </div>
       </footer>
     ),
-    [logo, systemName, t, currentYear, isDemoSiteMode],
+    [logo, systemName, systemLink, t, currentYear, isDemoSiteMode],
   );
 
   useEffect(() => {
@@ -229,12 +230,12 @@ const FooterBar = () => {
           <div className='absolute bottom-2 right-4 text-xs !text-semi-color-text-2 opacity-70'>
             <span>{t('设计与开发由')} </span>
             <a
-              href='https://github.com/QuantumNous/new-api'
+              href={systemLink}
               target='_blank'
               rel='noopener noreferrer'
               className='!text-semi-color-primary font-medium'
             >
-              New API
+              {systemName}
             </a>
           </div>
         </div>
