@@ -19,6 +19,7 @@ import {
     Collapsible,
     Checkbox,
     Divider,
+    TextArea,
 } from '@douyinfe/semi-ui';
 import {
     IconPlus,
@@ -30,6 +31,7 @@ import {
     IconSync,
 } from '@douyinfe/semi-icons';
 import { API } from '../../helpers/api';
+import { CHANNEL_OPTIONS } from '../../constants';
 
 const { Text } = Typography;
 
@@ -56,6 +58,13 @@ const SupplierPage = () => {
     const [unmappedGroups, setUnmappedGroups] = useState([]);
     const [selectedGroupIds, setSelectedGroupIds] = useState([]);
     const [batchCreating, setBatchCreating] = useState(false);
+    const [providerRules, setProviderRules] = useState([]);
+    const [providerRulesLoading, setProviderRulesLoading] = useState(false);
+    const [providerRulesVisible, setProviderRulesVisible] = useState(false);
+    const [repairingRules, setRepairingRules] = useState(false);
+    const [providerRuleTestInput, setProviderRuleTestInput] = useState({ upstream_group: '', local_group: '', models: '' });
+    const [providerRuleTestResult, setProviderRuleTestResult] = useState(null);
+    const [providerRuleTesting, setProviderRuleTesting] = useState(false);
 
     const loadSuppliers = useCallback(async () => {
         setLoading(true);
@@ -86,6 +95,135 @@ const SupplierPage = () => {
         loadSuppliers();
         loadExistingGroups();
     }, [loadSuppliers, loadExistingGroups]);
+
+    const loadProviderRules = useCallback(async () => {
+        setProviderRulesLoading(true);
+        try {
+            const res = await API.get(`${API_BASE}/provider_rules`);
+            if (res.data.success) {
+                setProviderRules(res.data.data || []);
+            }
+        } finally {
+            setProviderRulesLoading(false);
+        }
+    }, []);
+
+    const openProviderRules = async () => {
+        await loadProviderRules();
+        setProviderRulesVisible(true);
+    };
+
+    const updateProviderRule = (index, field, value) => {
+        setProviderRules((prev) =>
+            prev.map((rule, idx) =>
+                idx === index ? { ...rule, [field]: value } : rule,
+            ),
+        );
+    };
+
+    const addProviderRule = () => {
+        setProviderRules((prev) => [
+            ...prev,
+            { category: '', vendor_name: '', channel_type: 1, patterns: [] },
+        ]);
+    };
+
+    const removeProviderRule = (index) => {
+        setProviderRules((prev) => prev.filter((_, idx) => idx !== index));
+    };
+
+    const repairByProviderRules = async () => {
+        setRepairingRules(true);
+        try {
+            const res = await API.post(`${API_BASE}/provider_rules/repair`);
+            const data = res.data || {};
+            if (data.success) {
+                if (data.partial_success) {
+                    Toast.warning(data.message || '规则重跑完成，但有部分警告');
+                } else {
+                    Toast.success(data.message || '规则重跑完成');
+                }
+                if (Array.isArray(data.warnings) && data.warnings.length > 0) {
+                    Modal.warning({
+                        title: '规则修复警告',
+                        content: (
+                            <div style={{ maxHeight: 280, overflow: 'auto' }}>
+                                {data.warnings.map((msg, idx) => (
+                                    <div key={idx} style={{ marginBottom: 6 }}>
+                                        {msg}
+                                    </div>
+                                ))}
+                            </div>
+                        ),
+                    });
+                }
+                loadSuppliers();
+            } else {
+                Toast.error(data.message || '规则重跑失败');
+            }
+        } catch (e) {
+            Toast.error('规则重跑失败');
+        } finally {
+            setRepairingRules(false);
+        }
+    };
+
+    const testProviderRules = async () => {
+        setProviderRuleTesting(true);
+        try {
+            const payload = providerRules.map((rule) => ({
+                ...rule,
+                patterns: Array.isArray(rule.patterns)
+                    ? rule.patterns
+                    : String(rule.patterns || '')
+                          .split(/\n|,/)
+                          .map((item) => item.trim())
+                          .filter(Boolean),
+            }));
+            const res = await API.post(`${API_BASE}/provider_rules/test`, {
+                rules: payload,
+                upstream_group: providerRuleTestInput.upstream_group,
+                local_group: providerRuleTestInput.local_group,
+                models: String(providerRuleTestInput.models || '')
+                    .split(/\n|,/)
+                    .map((item) => item.trim())
+                    .filter(Boolean),
+            });
+            if (res.data.success) {
+                setProviderRuleTestResult(res.data.data || null);
+            } else {
+                Toast.error(res.data.message || '规则测试失败');
+            }
+        } catch (e) {
+            Toast.error('规则测试失败');
+        } finally {
+            setProviderRuleTesting(false);
+        }
+    };
+
+    const saveProviderRules = async () => {
+        try {
+            const payload = providerRules.map((rule) => ({
+                ...rule,
+                patterns: Array.isArray(rule.patterns)
+                    ? rule.patterns
+                    : String(rule.patterns || '')
+                          .split(/\n|,/)
+                          .map((item) => item.trim())
+                          .filter(Boolean),
+            }));
+            const res = await API.put(`${API_BASE}/provider_rules`, { rules: payload });
+            if (res.data.success) {
+                Toast.success(res.data.message || '规则已保存');
+                setProviderRules(res.data.data || payload);
+                setProviderRulesVisible(false);
+            } else {
+                Toast.error(res.data.message);
+            }
+        } catch (e) {
+            Toast.error('保存规则失败');
+        }
+    };
 
     // 打开编辑
     const openEdit = (supplier = null) => {
@@ -595,10 +733,33 @@ const SupplierPage = () => {
             render: (text) => <Tag color='cyan'>×{text?.toFixed(3)}</Tag>,
         },
         {
-            title: '通道类型',
-            dataIndex: 'endpoint_type',
-            width: 100,
-            render: (v) => <Tag>{v || 'openai'}</Tag>,
+            title: '目标供应商',
+            dataIndex: 'target_vendor_names',
+            width: 160,
+            render: (values = []) => {
+                const list = Array.isArray(values) ? values : [];
+                if (list.length === 0) return <Text type='tertiary'>-</Text>;
+                return <Text>{Array.from(new Set(list)).join(', ')}</Text>;
+            },
+        },
+        {
+            title: '目标类型',
+            dataIndex: 'target_channels',
+            width: 180,
+            render: (targets = []) => {
+                if (!Array.isArray(targets) || targets.length === 0) {
+                    return <Tag>{'openai'}</Tag>;
+                }
+                return (
+                    <Space wrap>
+                        {targets.map((target, idx) => (
+                            <Tag key={`${target.sync_key || idx}`} color='blue'>
+                                {target.channel_type_name || target.channel_type || 'OpenAI'}
+                            </Tag>
+                        ))}
+                    </Space>
+                );
+            },
         },
         {
             title: '支持模型',
@@ -654,6 +815,9 @@ const SupplierPage = () => {
                     >
                         一键更新所有供应商
                     </Button>
+                    <Button theme='light' onClick={openProviderRules}>
+                        供应商识别规则
+                    </Button>
                     <Button theme='light' type='warning' onClick={() => setBulkMarkupVisible(true)}>
                         一键设置所有倍率
                     </Button>
@@ -667,6 +831,96 @@ const SupplierPage = () => {
                 loading={loading}
                 pagination={false}
             />
+
+            <Modal
+                title='供应商识别规则'
+                visible={providerRulesVisible}
+                onCancel={() => setProviderRulesVisible(false)}
+                onOk={saveProviderRules}
+                size='large'
+                confirmLoading={providerRulesLoading}
+            >
+                <div style={{ maxHeight: 520, overflow: 'auto' }}>
+                    <Banner
+                        type='info'
+                        description='用于识别上游分组/模型属于哪个供应商，并推断默认渠道类型。Claude 建议设置为 Anthropic Claude(14)，Gemini 建议设置为 Google Gemini(24)。patterns 支持多个关键字，逗号或换行分隔。'
+                        style={{ marginBottom: 12 }}
+                    />
+                    <Space style={{ marginBottom: 12 }}>
+                        <Button onClick={addProviderRule}>新增规则</Button>
+                        <Button onClick={loadProviderRules} loading={providerRulesLoading}>刷新规则</Button>
+                        <Button theme='warning' loading={repairingRules} onClick={repairByProviderRules}>按当前规则修复已有数据</Button>
+                    </Space>
+                    <div style={{ border: '1px dashed var(--semi-color-border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                        <Text strong>规则命中测试</Text>
+                        <Space vertical align='start' style={{ width: '100%', marginTop: 8 }}>
+                            <Input
+                                value={providerRuleTestInput.upstream_group}
+                                placeholder='上游分组名，如 Claude Code / Gemini Pro / 混合分组'
+                                onChange={(value) => setProviderRuleTestInput((prev) => ({ ...prev, upstream_group: value }))}
+                            />
+                            <Input
+                                value={providerRuleTestInput.local_group}
+                                placeholder='本地分组名（可选）'
+                                onChange={(value) => setProviderRuleTestInput((prev) => ({ ...prev, local_group: value }))}
+                            />
+                            <TextArea
+                                value={providerRuleTestInput.models}
+                                placeholder='模型列表，逗号或换行分隔，如 claude-3-7-sonnet, gpt-4o'
+                                rows={3}
+                                onChange={(value) => setProviderRuleTestInput((prev) => ({ ...prev, models: value }))}
+                            />
+                            <Button theme='solid' loading={providerRuleTesting} onClick={testProviderRules}>立即测试</Button>
+                            {providerRuleTestResult && (
+                                <Descriptions
+                                    row
+                                    size='small'
+                                    data={[
+                                        { key: '分类', value: providerRuleTestResult.category || '-' },
+                                        { key: '供应商', value: providerRuleTestResult.vendor_name || '-' },
+                                        { key: '渠道类型', value: `${providerRuleTestResult.channel_type_name || '-'} (${providerRuleTestResult.channel_type || '-'})` },
+                                        { key: '命中关键字', value: Array.isArray(providerRuleTestResult.patterns) ? providerRuleTestResult.patterns.join(', ') : '-' },
+                                    ]}
+                                />
+                            )}
+                        </Space>
+                    </div>
+                    {providerRules.map((rule, index) => (
+                        <div key={`${rule.category || 'rule'}-${index}`} style={{ border: '1px solid var(--semi-color-border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+                            <Space vertical align='start' style={{ width: '100%' }}>
+                                <Input
+                                    value={rule.category || ''}
+                                    placeholder='分类标识，如 cc / gemini / codex'
+                                    onChange={(value) => updateProviderRule(index, 'category', value)}
+                                />
+                                <Input
+                                    value={rule.vendor_name || ''}
+                                    placeholder='模型供应商名称，如 Anthropic / Google / OpenAI'
+                                    onChange={(value) => updateProviderRule(index, 'vendor_name', value)}
+                                />
+                                <Select
+                                    value={rule.channel_type || 1}
+                                    optionList={CHANNEL_OPTIONS.map((option) => ({
+                                        label: `${option.label} (${option.value})`,
+                                        value: option.value,
+                                    }))}
+                                    filter
+                                    placeholder='选择渠道类型'
+                                    onChange={(value) => updateProviderRule(index, 'channel_type', Number(value || 1))}
+                                    style={{ width: '100%' }}
+                                />
+                                <TextArea
+                                    value={Array.isArray(rule.patterns) ? rule.patterns.join('\n') : rule.patterns || ''}
+                                    placeholder='匹配关键字，每行一个或逗号分隔'
+                                    rows={4}
+                                    onChange={(value) => updateProviderRule(index, 'patterns', value)}
+                                />
+                                <Button type='danger' theme='light' onClick={() => removeProviderRule(index)}>删除</Button>
+                            </Space>
+                        </div>
+                    ))}
+                </div>
+            </Modal>
 
             {/* 编辑供应商 SideSheet */}
             <SideSheet
@@ -834,10 +1088,33 @@ const SupplierPage = () => {
                                             render: (text) => <Tag color='cyan'>×{text?.toFixed(3)}</Tag>,
                                         },
                                         {
-                                            title: '通道类型',
-                                            dataIndex: 'endpoint_type',
-                                            width: 100,
-                                            render: (v) => <Tag>{v || 'openai'}</Tag>,
+                                            title: '目标供应商',
+                                            dataIndex: 'target_vendor_names',
+                                            width: 140,
+                                            render: (values = []) => {
+                                                const list = Array.isArray(values) ? values : [];
+                                                if (list.length === 0) return <Text type='tertiary'>-</Text>;
+                                                return <Text>{Array.from(new Set(list)).join(', ')}</Text>;
+                                            },
+                                        },
+                                        {
+                                            title: '目标类型',
+                                            dataIndex: 'target_channels',
+                                            width: 160,
+                                            render: (targets = []) => {
+                                                if (!Array.isArray(targets) || targets.length === 0) {
+                                                    return <Tag>{'openai'}</Tag>;
+                                                }
+                                                return (
+                                                    <Space wrap>
+                                                        {targets.map((target, idx) => (
+                                                            <Tag key={`${target.sync_key || idx}`} color='blue'>
+                                                                {target.channel_type_name || target.channel_type || 'OpenAI'}
+                                                            </Tag>
+                                                        ))}
+                                                    </Space>
+                                                );
+                                            },
                                         },
                                         {
                                             title: 'API密钥',

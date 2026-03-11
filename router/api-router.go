@@ -229,6 +229,10 @@ func SetApiRouter(router *gin.Engine) {
 			supplierRoute.POST("/sync_all_full", controller.SyncAllSuppliersFull)
 			supplierRoute.POST("/:id/batch_create_channels", controller.BatchCreateChannels)
 			supplierRoute.POST("/:id/batch_map_local", controller.BatchMapLocalGroup)
+			supplierRoute.GET("/provider_rules", controller.GetSupplierProviderRules)
+			supplierRoute.POST("/provider_rules/test", controller.TestSupplierProviderRules)
+			supplierRoute.PUT("/provider_rules", controller.UpdateSupplierProviderRules)
+			supplierRoute.POST("/provider_rules/repair", controller.RepairSuppliersByProviderRules)
 		}
 		notificationRoute := apiRouter.Group("/notification")
 		notificationRoute.Use(middleware.RootAuth())

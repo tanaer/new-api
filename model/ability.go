@@ -28,6 +28,23 @@ type AbilityWithChannel struct {
 	ChannelType int `json:"channel_type"`
 }
 
+func normalizeAbilityValues(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
 func GetAllEnableAbilityWithChannels() ([]AbilityWithChannel, error) {
 	var abilities []AbilityWithChannel
 	err := DB.Table("abilities").
@@ -144,8 +161,8 @@ func GetChannel(group string, model string, retry int) (*Channel, error) {
 }
 
 func (channel *Channel) AddAbilities(tx *gorm.DB) error {
-	models_ := strings.Split(channel.Models, ",")
-	groups_ := strings.Split(channel.Group, ",")
+	models_ := normalizeAbilityValues(strings.Split(channel.Models, ","))
+	groups_ := normalizeAbilityValues(strings.Split(channel.Group, ","))
 	abilitySet := make(map[string]struct{})
 	abilities := make([]Ability, 0, len(models_))
 	for _, model := range models_ {
@@ -216,8 +233,8 @@ func (channel *Channel) UpdateAbilities(tx *gorm.DB) error {
 	}
 
 	// Then add new abilities
-	models_ := strings.Split(channel.Models, ",")
-	groups_ := strings.Split(channel.Group, ",")
+	models_ := normalizeAbilityValues(strings.Split(channel.Models, ","))
+	groups_ := normalizeAbilityValues(strings.Split(channel.Group, ","))
 	abilitySet := make(map[string]struct{})
 	abilities := make([]Ability, 0, len(models_))
 	for _, model := range models_ {

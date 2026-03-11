@@ -190,7 +190,29 @@ func SyncOptions(frequency int) {
 	}
 }
 
+func normalizePersistedOptionValue(key string, value string) (string, error) {
+	switch key {
+	case "ModelRatio":
+		return ratio_setting.NormalizeModelRatioOptionJSON(value)
+	case "CompletionRatio":
+		return ratio_setting.NormalizeCompletionRatioOptionJSON(value)
+	case "ModelPrice":
+		return ratio_setting.NormalizeModelPriceOptionJSON(value)
+	case "CacheRatio":
+		return ratio_setting.NormalizeCacheRatioOptionJSON(value)
+	case "CreateCacheRatio":
+		return ratio_setting.NormalizeCreateCacheRatioOptionJSON(value)
+	default:
+		return value, nil
+	}
+}
+
 func UpdateOption(key string, value string) error {
+	persistedValue, err := normalizePersistedOptionValue(key, value)
+	if err != nil {
+		return err
+	}
+
 	common.OptionMapRWMutex.RLock()
 	oldValue, hasOldValue := common.OptionMap[key]
 	common.OptionMapRWMutex.RUnlock()
@@ -205,10 +227,14 @@ func UpdateOption(key string, value string) error {
 		common.OptionMapRWMutex.Unlock()
 	}
 
-	if err := updateOptionMap(key, value); err != nil {
+	if err := updateOptionMap(key, persistedValue); err != nil {
 		restoreOptionState()
 		return err
 	}
+
+	common.OptionMapRWMutex.RLock()
+	persistValue := common.OptionMap[key]
+	common.OptionMapRWMutex.RUnlock()
 
 	return DB.Transaction(func(tx *gorm.DB) error {
 		option := Option{Key: key}
@@ -216,7 +242,7 @@ func UpdateOption(key string, value string) error {
 			restoreOptionState()
 			return err
 		}
-		option.Value = value
+		option.Value = persistValue
 		if err := tx.Save(&option).Error; err != nil {
 			restoreOptionState()
 			return err

@@ -455,6 +455,8 @@ func (channel *Channel) GetStatusCodeMapping() string {
 }
 
 func (channel *Channel) Insert() error {
+	channel.Models = strings.Join(normalizeAbilityValues(strings.Split(channel.Models, ",")), ",")
+	channel.Group = strings.Join(normalizeAbilityValues(strings.Split(channel.Group, ",")), ",")
 	var err error
 	err = DB.Create(channel).Error
 	if err != nil {
@@ -465,6 +467,8 @@ func (channel *Channel) Insert() error {
 }
 
 func (channel *Channel) Update() error {
+	channel.Models = strings.Join(normalizeAbilityValues(strings.Split(channel.Models, ",")), ",")
+	channel.Group = strings.Join(normalizeAbilityValues(strings.Split(channel.Group, ",")), ",")
 	// If this is a multi-key channel, recalculate MultiKeySize based on the current key list to avoid inconsistency after editing keys
 	if channel.ChannelInfo.IsMultiKey {
 		var keyStr string

@@ -52,6 +52,30 @@ func (mi *Model) Insert() error {
 	originalStatus := mi.Status
 	originalSyncOfficial := mi.SyncOfficial
 
+	var existing Model
+	if err := DB.Unscoped().Where("model_name = ?", mi.ModelName).Order("id DESC").First(&existing).Error; err == nil {
+		if existing.DeletedAt.Valid {
+			existing.Description = mi.Description
+			existing.Icon = mi.Icon
+			existing.Tags = mi.Tags
+			existing.VendorID = mi.VendorID
+			existing.Endpoints = mi.Endpoints
+			existing.Status = originalStatus
+			existing.SyncOfficial = originalSyncOfficial
+			existing.NameRule = mi.NameRule
+			existing.CreatedTime = mi.CreatedTime
+			existing.UpdatedTime = mi.UpdatedTime
+			existing.DeletedAt = gorm.DeletedAt{}
+			if err := DB.Unscoped().Model(&Model{}).Where("id = ?", existing.Id).
+				Select("model_name", "description", "icon", "tags", "vendor_id", "endpoints", "status", "sync_official", "created_time", "updated_time", "name_rule", "deleted_at").
+				Updates(&existing).Error; err != nil {
+				return err
+			}
+			*mi = existing
+			return nil
+		}
+	}
+
 	// 先创建记录（GORM 会对零值字段应用默认值）
 	if err := DB.Create(mi).Error; err != nil {
 		return err

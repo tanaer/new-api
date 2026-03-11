@@ -61,6 +61,18 @@ func valuesEqual(a, b interface{}) bool {
 
 var ratioTypes = []string{"model_ratio", "completion_ratio", "cache_ratio", "model_price"}
 
+func isSuspiciousUpstreamPricingResult(modelName string, modelRatio float64, completionRatio float64) bool {
+	normalized := ratio_setting.FormatMatchingModelName(strings.TrimSpace(modelName))
+	_, exists := ratio_setting.GetDefaultModelRatioMap()[normalized]
+	if exists {
+		return false
+	}
+	if modelRatio != 37.5 {
+		return false
+	}
+	return completionRatio <= 0 || completionRatio == 1 || completionRatio == 5
+}
+
 type upstreamResult struct {
 	Name string         `json:"name"`
 	Data map[string]any `json:"data,omitempty"`
@@ -453,7 +465,7 @@ func buildDifferences(localData map[string]any, successfulChannels []struct {
 						// 转换为float64进行比较
 						if modelRatioFloat, ok := modelRatioVal.(float64); ok {
 							if completionRatioFloat, ok := completionRatioVal.(float64); ok {
-								if modelRatioFloat == 37.5 && completionRatioFloat == 1.0 {
+								if isSuspiciousUpstreamPricingResult(modelName, modelRatioFloat, completionRatioFloat) {
 									confidenceMap[channel.name][modelName] = false
 								}
 							}

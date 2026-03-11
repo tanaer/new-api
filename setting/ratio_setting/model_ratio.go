@@ -1,10 +1,12 @@
 package ratio_setting
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/reasoning"
 	"github.com/QuantumNous/new-api/types"
 )
 
@@ -140,6 +142,7 @@ var defaultModelRatio = map[string]float64{
 	"claude-3-7-sonnet-20250219-thinking":       1.5,
 	"claude-sonnet-4-20250514":                  1.5,
 	"claude-sonnet-4-5-20250929":                1.5,
+	"claude-sonnet-4-6":                         1.5,
 	"claude-opus-4-5-20251101":                  2.5,
 	"claude-opus-4-6":                           2.5,
 	"claude-opus-4-6-max":                       2.5,
@@ -350,11 +353,11 @@ func GetModelPriceMap() map[string]float64 {
 }
 
 func ModelPrice2JSONString() string {
-	return modelPriceMap.MarshalJSONString()
+	return marshalRatioMapJSON(GetModelPriceCopy())
 }
 
 func UpdateModelPriceByJSONString(jsonStr string) error {
-	return types.LoadFromJsonStringWithCallback(modelPriceMap, jsonStr, InvalidateExposedDataCache)
+	return loadMergedRatioMapJSON(modelPriceMap, defaultModelPrice, jsonStr, InvalidateExposedDataCache)
 }
 
 // GetModelPrice 返回模型的价格，如果模型不存在则返回-1，false
@@ -363,6 +366,9 @@ func GetModelPrice(name string, printErr bool) (float64, bool) {
 
 	if strings.HasSuffix(name, CompactModelSuffix) {
 		price, ok := modelPriceMap.Get(CompactWildcardModelKey)
+		if !ok {
+			price, ok = defaultModelPrice[CompactWildcardModelKey]
+		}
 		if !ok {
 			if printErr {
 				common.SysError("model price not found: " + name)
@@ -374,6 +380,9 @@ func GetModelPrice(name string, printErr bool) (float64, bool) {
 
 	price, ok := modelPriceMap.Get(name)
 	if !ok {
+		price, ok = defaultModelPrice[name]
+	}
+	if !ok {
 		if printErr {
 			common.SysError("model price not found: " + name)
 		}
@@ -383,7 +392,7 @@ func GetModelPrice(name string, printErr bool) (float64, bool) {
 }
 
 func UpdateModelRatioByJSONString(jsonStr string) error {
-	return types.LoadFromJsonStringWithCallback(modelRatioMap, jsonStr, InvalidateExposedDataCache)
+	return loadMergedRatioMapJSON(modelRatioMap, defaultModelRatio, jsonStr, InvalidateExposedDataCache)
 }
 
 // 处理带有思考预算的模型名称，方便统一定价
@@ -399,8 +408,14 @@ func GetModelRatio(name string) (float64, bool, string) {
 
 	ratio, ok := modelRatioMap.Get(name)
 	if !ok {
+		ratio, ok = defaultModelRatio[name]
+	}
+	if !ok {
 		if strings.HasSuffix(name, CompactModelSuffix) {
 			if wildcardRatio, ok := modelRatioMap.Get(CompactWildcardModelKey); ok {
+				return wildcardRatio, true, name
+			}
+			if wildcardRatio, ok := defaultModelRatio[CompactWildcardModelKey]; ok {
 				return wildcardRatio, true, name
 			}
 			//return 0, true, name
@@ -408,6 +423,24 @@ func GetModelRatio(name string) (float64, bool, string) {
 		return 37.5, operation_setting.SelfUseModeEnabled, name
 	}
 	return ratio, true, name
+}
+
+func GetConfiguredModelRatio(name string) (float64, bool, string) {
+	name = FormatMatchingModelName(name)
+
+	ratio, ok := modelRatioMap.Get(name)
+	if !ok {
+		ratio, ok = defaultModelRatio[name]
+	}
+	if !ok && strings.HasSuffix(name, CompactModelSuffix) {
+		if wildcardRatio, ok := modelRatioMap.Get(CompactWildcardModelKey); ok {
+			return wildcardRatio, true, name
+		}
+		if wildcardRatio, ok := defaultModelRatio[CompactWildcardModelKey]; ok {
+			return wildcardRatio, true, name
+		}
+	}
+	return ratio, ok, name
 }
 
 func DefaultModelRatio2JSONString() string {
@@ -427,11 +460,11 @@ func GetDefaultModelPriceMap() map[string]float64 {
 }
 
 func CompletionRatio2JSONString() string {
-	return completionRatioMap.MarshalJSONString()
+	return marshalRatioMapJSON(GetCompletionRatioCopy())
 }
 
 func UpdateCompletionRatioByJSONString(jsonStr string) error {
-	return types.LoadFromJsonStringWithCallback(completionRatioMap, jsonStr, InvalidateExposedDataCache)
+	return loadMergedRatioMapJSON(completionRatioMap, defaultCompletionRatio, jsonStr, InvalidateExposedDataCache)
 }
 
 func GetCompletionRatio(name string) float64 {
@@ -441,12 +474,18 @@ func GetCompletionRatio(name string) float64 {
 		if ratio, ok := completionRatioMap.Get(name); ok {
 			return ratio
 		}
+		if ratio, ok := defaultCompletionRatio[name]; ok {
+			return ratio
+		}
 	}
 	hardCodedRatio, contain := getHardcodedCompletionModelRatio(name)
 	if contain {
 		return hardCodedRatio
 	}
 	if ratio, ok := completionRatioMap.Get(name); ok {
+		return ratio
+	}
+	if ratio, ok := defaultCompletionRatio[name]; ok {
 		return ratio
 	}
 	return hardCodedRatio
@@ -612,6 +651,83 @@ var imageRatioMap = types.NewRWMap[string, float64]()
 var audioRatioMap = types.NewRWMap[string, float64]()
 var audioCompletionRatioMap = types.NewRWMap[string, float64]()
 
+func cloneRatioMap(source map[string]float64) map[string]float64 {
+	cloned := make(map[string]float64, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func mergeRatioDefaults(defaults map[string]float64, overrides map[string]float64) map[string]float64 {
+	merged := cloneRatioMap(defaults)
+	for key, value := range overrides {
+		merged[key] = value
+	}
+	return merged
+}
+
+func marshalRatioMapJSON(data map[string]float64) string {
+	jsonBytes, err := common.Marshal(data)
+	if err != nil {
+		return "{}"
+	}
+	return string(jsonBytes)
+}
+
+func loadMergedRatioMapJSON(m *types.RWMap[string, float64], defaults map[string]float64, jsonStr string, onSuccess func()) error {
+	overrides := make(map[string]float64)
+	if strings.TrimSpace(jsonStr) != "" {
+		if err := common.Unmarshal([]byte(jsonStr), &overrides); err != nil {
+			return err
+		}
+	}
+	m.Clear()
+	m.AddAll(mergeRatioDefaults(defaults, overrides))
+	if onSuccess != nil {
+		onSuccess()
+	}
+	return nil
+}
+
+func compactRatioMapByDefaults(values map[string]float64, defaults map[string]float64) map[string]float64 {
+	compacted := make(map[string]float64)
+	for key, value := range values {
+		if defaultValue, exists := defaults[key]; exists && defaultValue == value {
+			continue
+		}
+		compacted[key] = value
+	}
+	return compacted
+}
+
+func normalizeRatioOptionJSON(jsonStr string, defaults map[string]float64) (string, error) {
+	values := make(map[string]float64)
+	if strings.TrimSpace(jsonStr) != "" {
+		if err := common.Unmarshal([]byte(jsonStr), &values); err != nil {
+			return "", err
+		}
+	}
+	for key, value := range values {
+		if value < 0 {
+			return "", fmt.Errorf("invalid negative ratio for %s", key)
+		}
+	}
+	return marshalRatioMapJSON(compactRatioMapByDefaults(values, defaults)), nil
+}
+
+func NormalizeModelRatioOptionJSON(jsonStr string) (string, error) {
+	return normalizeRatioOptionJSON(jsonStr, defaultModelRatio)
+}
+
+func NormalizeCompletionRatioOptionJSON(jsonStr string) (string, error) {
+	return normalizeRatioOptionJSON(jsonStr, defaultCompletionRatio)
+}
+
+func NormalizeModelPriceOptionJSON(jsonStr string) (string, error) {
+	return normalizeRatioOptionJSON(jsonStr, defaultModelPrice)
+}
+
 func ImageRatio2JSONString() string {
 	return imageRatioMap.MarshalJSONString()
 }
@@ -645,19 +761,32 @@ func UpdateAudioCompletionRatioByJSONString(jsonStr string) error {
 }
 
 func GetModelRatioCopy() map[string]float64 {
-	return modelRatioMap.ReadAll()
+	return mergeRatioDefaults(defaultModelRatio, modelRatioMap.ReadAll())
 }
 
 func GetModelPriceCopy() map[string]float64 {
-	return modelPriceMap.ReadAll()
+	return mergeRatioDefaults(defaultModelPrice, modelPriceMap.ReadAll())
 }
 
 func GetCompletionRatioCopy() map[string]float64 {
-	return completionRatioMap.ReadAll()
+	return mergeRatioDefaults(defaultCompletionRatio, completionRatioMap.ReadAll())
 }
 
 // 转换模型名，减少渠道必须配置各种带参数模型
 func FormatMatchingModelName(name string) string {
+	name = strings.TrimSpace(name)
+	if bracketIndex := strings.Index(name, "["); bracketIndex > 0 && strings.HasSuffix(name, "]") {
+		name = strings.TrimSpace(name[:bracketIndex])
+	}
+
+	if strings.HasPrefix(name, "claude-") {
+		if strings.HasSuffix(name, "-thinking") {
+			name = strings.TrimSuffix(name, "-thinking")
+		}
+		if baseName, _, ok := reasoning.TrimEffortSuffix(name); ok {
+			name = baseName
+		}
+	}
 
 	if strings.HasPrefix(name, "gemini-2.5-flash-lite") {
 		name = handleThinkingBudgetModel(name, "gemini-2.5-flash-lite", "gemini-2.5-flash-lite-thinking-*")

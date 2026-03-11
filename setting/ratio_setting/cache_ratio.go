@@ -106,22 +106,22 @@ func GetCacheRatioMap() map[string]float64 {
 
 // CacheRatio2JSONString converts the cache ratio map to a JSON string
 func CacheRatio2JSONString() string {
-	return cacheRatioMap.MarshalJSONString()
+	return marshalRatioMapJSON(GetCacheRatioCopy())
 }
 
 // CreateCacheRatio2JSONString converts the create cache ratio map to a JSON string
 func CreateCacheRatio2JSONString() string {
-	return createCacheRatioMap.MarshalJSONString()
+	return marshalRatioMapJSON(GetCreateCacheRatioCopy())
 }
 
 // UpdateCacheRatioByJSONString updates the cache ratio map from a JSON string
 func UpdateCacheRatioByJSONString(jsonStr string) error {
-	return types.LoadFromJsonStringWithCallback(cacheRatioMap, jsonStr, InvalidateExposedDataCache)
+	return loadMergedRatioMapJSON(cacheRatioMap, defaultCacheRatio, jsonStr, InvalidateExposedDataCache)
 }
 
 // UpdateCreateCacheRatioByJSONString updates the create cache ratio map from a JSON string
 func UpdateCreateCacheRatioByJSONString(jsonStr string) error {
-	return types.LoadFromJsonStringWithCallback(createCacheRatioMap, jsonStr, InvalidateExposedDataCache)
+	return loadMergedRatioMapJSON(createCacheRatioMap, defaultCreateCacheRatio, jsonStr, InvalidateExposedDataCache)
 }
 
 // GetCacheRatio returns the cache ratio for a model
@@ -142,9 +142,17 @@ func GetCreateCacheRatio(name string) (float64, bool) {
 }
 
 func GetCacheRatioCopy() map[string]float64 {
-	return cacheRatioMap.ReadAll()
+	return mergeRatioDefaults(defaultCacheRatio, cacheRatioMap.ReadAll())
 }
 
 func GetCreateCacheRatioCopy() map[string]float64 {
-	return createCacheRatioMap.ReadAll()
+	return mergeRatioDefaults(defaultCreateCacheRatio, createCacheRatioMap.ReadAll())
+}
+
+func NormalizeCacheRatioOptionJSON(jsonStr string) (string, error) {
+	return normalizeRatioOptionJSON(jsonStr, defaultCacheRatio)
+}
+
+func NormalizeCreateCacheRatioOptionJSON(jsonStr string) (string, error) {
+	return normalizeRatioOptionJSON(jsonStr, defaultCreateCacheRatio)
 }

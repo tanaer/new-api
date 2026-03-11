@@ -393,6 +393,965 @@ type UpstreamPricingInfo struct {
 	GroupEndpointTypes map[string][]string // 分组名 -> 支持的端点类型列表
 	UsableGroup        map[string]string   // 分组名 -> 分组显示名
 	AllModels          []string            // 所有模型列表
+	ModelRatios        map[string]float64  // 模型倍率
+	CompletionRatios   map[string]float64  // 补全倍率
+	ModelPrices        map[string]float64  // 固定价格
+	CacheRatios        map[string]float64  // 缓存倍率
+}
+
+type supplierModelRule struct {
+	Pattern  string
+	Category string
+}
+
+type supplierModelResolver struct {
+	rules                  []supplierProviderRule
+	exactCategoryByModel   map[string]string
+	prefixRules            []supplierModelRule
+	suffixRules            []supplierModelRule
+	containsRules          []supplierModelRule
+	customModelsByCategory map[string][]string
+}
+
+type supplierChannelTarget struct {
+	SyncKey       string
+	Name          string
+	UpstreamGroup string
+	LocalGroup    string
+	Models        []string
+	ApiKey        string
+	ChannelType   int
+	GroupRatio    float64
+	EndpointType  string
+	SourceGroup   *model.SupplierGroup
+}
+
+type supplierExistingChannelRef struct {
+	Channel *model.Channel
+	Matched bool
+}
+
+type supplierProviderRule struct {
+	Category    string   `json:"category"`
+	VendorName  string   `json:"vendor_name"`
+	ChannelType int      `json:"channel_type"`
+	Patterns    []string `json:"patterns"`
+}
+
+const (
+	supplierChannelSyncKeyField       = "supplier_sync_key"
+	supplierChannelUpstreamGroupField = "supplier_upstream_group"
+	supplierChannelLocalGroupField    = "supplier_local_group"
+	supplierProviderRulesOptionKey    = "SupplierProviderRules"
+)
+
+var defaultSupplierProviderRules = []supplierProviderRule{
+	{Category: "cc", VendorName: "Anthropic", ChannelType: constant.ChannelTypeAnthropic, Patterns: []string{"claudecode", "claude code", "anthropic", "claude", "cc"}},
+	{Category: "sora", VendorName: "OpenAI", ChannelType: constant.ChannelTypeSora, Patterns: []string{"sora"}},
+	{Category: "codex", VendorName: "OpenAI", ChannelType: constant.ChannelTypeOpenAI, Patterns: []string{"chatgpt", "openai", "codex", "gpt", "o1", "o3", "o4", "whisper", "dall-e", "omni-moderation", "text-embedding"}},
+	{Category: "gemini", VendorName: "Google", ChannelType: constant.ChannelTypeGemini, Patterns: []string{"google", "gemini"}},
+	{Category: "pplx", VendorName: "Perplexity", ChannelType: constant.ChannelTypePerplexity, Patterns: []string{"perplexity", "pplx", "sonar"}},
+	{Category: "deepseek", VendorName: "DeepSeek", ChannelType: constant.ChannelTypeDeepSeek, Patterns: []string{"deepseek"}},
+	{Category: "qwen", VendorName: "阿里巴巴", ChannelType: constant.ChannelTypeAli, Patterns: []string{"tongyi", "qwen", "alibaba", "aliyun", "阿里"}},
+	{Category: "moonshot", VendorName: "Moonshot", ChannelType: constant.ChannelTypeMoonshot, Patterns: []string{"moonshot", "kimi"}},
+	{Category: "glm", VendorName: "智谱", ChannelType: constant.ChannelTypeZhipu, Patterns: []string{"chatglm", "zhipu", "glm", "智谱"}},
+	{Category: "doubao", VendorName: "字节跳动", ChannelType: constant.ChannelTypeVolcEngine, Patterns: []string{"doubao", "字节", "bytedance"}},
+	{Category: "hunyuan", VendorName: "腾讯", ChannelType: constant.ChannelTypeTencent, Patterns: []string{"hunyuan", "腾讯", "tencent"}},
+	{Category: "ernie", VendorName: "百度", ChannelType: constant.ChannelTypeBaidu, Patterns: []string{"ernie", "wenxin", "百度", "baidu"}},
+	{Category: "spark", VendorName: "讯飞", ChannelType: constant.ChannelTypeXunfei, Patterns: []string{"spark", "讯飞", "xfyun"}},
+	{Category: "minimax", VendorName: "MiniMax", ChannelType: constant.ChannelTypeMiniMax, Patterns: []string{"minimax", "abab"}},
+	{Category: "cohere", VendorName: "Cohere", ChannelType: constant.ChannelTypeCohere, Patterns: []string{"cohere", "command"}},
+	{Category: "grok", VendorName: "xAI", ChannelType: constant.ChannelTypeXai, Patterns: []string{"grok", "xai", "x.ai"}},
+	{Category: "llama", VendorName: "Meta", ChannelType: constant.ChannelTypeOpenAI, Patterns: []string{"llama", "meta"}},
+	{Category: "mistral", VendorName: "Mistral", ChannelType: constant.ChannelTypeMistral, Patterns: []string{"mistral"}},
+	{Category: "jina", VendorName: "Jina", ChannelType: constant.ChannelTypeJina, Patterns: []string{"jina"}},
+	{Category: "cloudflare", VendorName: "Cloudflare", ChannelType: constant.ChannelCloudflare, Patterns: []string{"cloudflare", "@cf/"}},
+}
+
+func cloneSupplierProviderRules(rules []supplierProviderRule) []supplierProviderRule {
+	result := make([]supplierProviderRule, 0, len(rules))
+	for _, rule := range rules {
+		copied := supplierProviderRule{
+			Category:    strings.TrimSpace(rule.Category),
+			VendorName:  strings.TrimSpace(rule.VendorName),
+			ChannelType: rule.ChannelType,
+			Patterns:    make([]string, 0, len(rule.Patterns)),
+		}
+		seen := make(map[string]struct{})
+		for _, pattern := range rule.Patterns {
+			pattern = strings.TrimSpace(pattern)
+			if pattern == "" {
+				continue
+			}
+			if _, exists := seen[pattern]; exists {
+				continue
+			}
+			seen[pattern] = struct{}{}
+			copied.Patterns = append(copied.Patterns, pattern)
+		}
+		if copied.Category == "" || len(copied.Patterns) == 0 {
+			continue
+		}
+		result = append(result, copied)
+	}
+	return result
+}
+
+func mergeSupplierProviderRules(customRules []supplierProviderRule) []supplierProviderRule {
+	defaults := cloneSupplierProviderRules(defaultSupplierProviderRules)
+	customRules = cloneSupplierProviderRules(customRules)
+	if len(customRules) == 0 {
+		return defaults
+	}
+
+	defaultByCategory := make(map[string]supplierProviderRule, len(defaults))
+	for _, rule := range defaults {
+		defaultByCategory[rule.Category] = rule
+	}
+
+	merged := make([]supplierProviderRule, 0, len(customRules)+len(defaults))
+	seen := make(map[string]struct{}, len(customRules))
+	for _, rule := range customRules {
+		if defaultRule, exists := defaultByCategory[rule.Category]; exists {
+			if strings.TrimSpace(rule.VendorName) == "" {
+				rule.VendorName = defaultRule.VendorName
+			}
+			if rule.ChannelType == 0 {
+				rule.ChannelType = defaultRule.ChannelType
+			}
+			if len(rule.Patterns) == 0 {
+				rule.Patterns = append([]string(nil), defaultRule.Patterns...)
+			}
+		}
+		if rule.Category == "" || len(rule.Patterns) == 0 {
+			continue
+		}
+		merged = append(merged, rule)
+		seen[rule.Category] = struct{}{}
+	}
+
+	for _, rule := range defaults {
+		if _, exists := seen[rule.Category]; exists {
+			continue
+		}
+		merged = append(merged, rule)
+	}
+	return merged
+}
+
+func getSupplierProviderRules() []supplierProviderRule {
+	defaults := cloneSupplierProviderRules(defaultSupplierProviderRules)
+	raw := strings.TrimSpace(common.OptionMap[supplierProviderRulesOptionKey])
+	if raw == "" {
+		return defaults
+	}
+	var customRules []supplierProviderRule
+	if err := common.UnmarshalJsonStr(raw, &customRules); err != nil {
+		return defaults
+	}
+	return mergeSupplierProviderRules(customRules)
+}
+
+func getSupplierProviderRuleByCategory(category string, rules []supplierProviderRule) (supplierProviderRule, bool) {
+	category = strings.TrimSpace(category)
+	for _, rule := range rules {
+		if strings.TrimSpace(rule.Category) == category {
+			return rule, true
+		}
+	}
+	return supplierProviderRule{}, false
+}
+
+func normalizeComparableName(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	replacer := strings.NewReplacer("-", "", "_", "", " ", "", "·", "", ".", "", "/", "", "(", "", ")", "")
+	return replacer.Replace(value)
+}
+
+func detectSupplierCategoryWithRules(rules []supplierProviderRule, values ...string) string {
+	for _, value := range values {
+		raw := strings.ToLower(strings.TrimSpace(value))
+		compact := normalizeComparableName(value)
+		if raw == "" && compact == "" {
+			continue
+		}
+		for _, rule := range rules {
+			for _, pattern := range rule.Patterns {
+				patternLower := strings.ToLower(strings.TrimSpace(pattern))
+				patternCompact := normalizeComparableName(patternLower)
+				if patternLower != "" && strings.Contains(raw, patternLower) {
+					return rule.Category
+				}
+				if patternCompact != "" && strings.Contains(compact, patternCompact) {
+					return rule.Category
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func detectSupplierCategory(values ...string) string {
+	return detectSupplierCategoryWithRules(getSupplierProviderRules(), values...)
+}
+
+func loadSupplierModelResolverWithRules(rules []supplierProviderRule) *supplierModelResolver {
+	rules = cloneSupplierProviderRules(rules)
+	resolver := &supplierModelResolver{
+		rules:                  rules,
+		exactCategoryByModel:   make(map[string]string),
+		customModelsByCategory: make(map[string][]string),
+	}
+
+	vendorNameByID := make(map[int]string)
+	models := make([]model.Model, 0)
+	if model.DB != nil {
+		var vendors []model.Vendor
+		_ = model.DB.Find(&vendors).Error
+		vendorNameByID = make(map[int]string, len(vendors))
+		for i := range vendors {
+			vendorNameByID[vendors[i].Id] = strings.TrimSpace(vendors[i].Name)
+		}
+		_ = model.DB.Find(&models).Error
+	}
+
+	customSetByCategory := make(map[string]map[string]struct{})
+	for i := range models {
+		meta := models[i]
+		modelName := strings.TrimSpace(meta.ModelName)
+		if modelName == "" {
+			continue
+		}
+
+		category := detectSupplierCategoryWithRules(rules, modelName)
+		if category == "" {
+			category = detectSupplierCategoryWithRules(rules, vendorNameByID[meta.VendorID], modelName)
+		}
+		if category == "" {
+			continue
+		}
+
+		rule := supplierModelRule{Pattern: modelName, Category: category}
+		switch meta.NameRule {
+		case model.NameRulePrefix:
+			resolver.prefixRules = append(resolver.prefixRules, rule)
+		case model.NameRuleSuffix:
+			resolver.suffixRules = append(resolver.suffixRules, rule)
+		case model.NameRuleContains:
+			resolver.containsRules = append(resolver.containsRules, rule)
+		default:
+			resolver.exactCategoryByModel[modelName] = category
+			if meta.SyncOfficial == 0 {
+				if _, exists := customSetByCategory[category]; !exists {
+					customSetByCategory[category] = make(map[string]struct{})
+				}
+				customSetByCategory[category][modelName] = struct{}{}
+			}
+		}
+	}
+
+	for category, modelSet := range customSetByCategory {
+		models := make([]string, 0, len(modelSet))
+		for modelName := range modelSet {
+			models = append(models, modelName)
+		}
+		sort.Strings(models)
+		resolver.customModelsByCategory[category] = models
+	}
+
+	return resolver
+}
+
+func loadSupplierModelResolver() *supplierModelResolver {
+	return loadSupplierModelResolverWithRules(getSupplierProviderRules())
+}
+
+func (resolver *supplierModelResolver) DetectCategory(modelName string) string {
+	if resolver == nil {
+		return detectSupplierCategory(modelName)
+	}
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		return ""
+	}
+	if category, exists := resolver.exactCategoryByModel[modelName]; exists {
+		return category
+	}
+	for _, rule := range resolver.prefixRules {
+		if strings.HasPrefix(modelName, rule.Pattern) {
+			return rule.Category
+		}
+	}
+	for _, rule := range resolver.suffixRules {
+		if strings.HasSuffix(modelName, rule.Pattern) {
+			return rule.Category
+		}
+	}
+	for _, rule := range resolver.containsRules {
+		if strings.Contains(modelName, rule.Pattern) {
+			return rule.Category
+		}
+	}
+	return detectSupplierCategoryWithRules(resolver.rules, modelName)
+}
+
+func (resolver *supplierModelResolver) CustomModelsForCategory(category string) []string {
+	if resolver == nil {
+		return nil
+	}
+	models := resolver.customModelsByCategory[strings.TrimSpace(category)]
+	if len(models) == 0 {
+		return nil
+	}
+	result := make([]string, len(models))
+	copy(result, models)
+	return result
+}
+
+func ensureSupplierVendor(vendorName string, vendorIDCache map[string]int) int {
+	vendorName = strings.TrimSpace(vendorName)
+	if vendorName == "" {
+		return 0
+	}
+	if vendorIDCache != nil {
+		if id, exists := vendorIDCache[vendorName]; exists {
+			return id
+		}
+	}
+	var existing model.Vendor
+	if err := model.DB.Where("name = ?", vendorName).First(&existing).Error; err == nil {
+		if vendorIDCache != nil {
+			vendorIDCache[vendorName] = existing.Id
+		}
+		return existing.Id
+	}
+	vendor := &model.Vendor{
+		Name:   vendorName,
+		Status: 1,
+	}
+	if err := vendor.Insert(); err != nil {
+		if vendorIDCache != nil {
+			vendorIDCache[vendorName] = 0
+		}
+		return 0
+	}
+	if vendorIDCache != nil {
+		vendorIDCache[vendorName] = vendor.Id
+	}
+	return vendor.Id
+}
+
+func syncSupplierModelsToMeta(targets map[string]supplierChannelTarget, resolver *supplierModelResolver) (int, int, []string) {
+	if len(targets) == 0 {
+		return 0, 0, nil
+	}
+	warnings := make([]string, 0)
+	created := 0
+	updated := 0
+	vendorIDCache := make(map[string]int)
+	processed := make(map[string]struct{})
+
+	for _, target := range targets {
+		for _, modelName := range normalizeModelNames(target.Models) {
+			modelCategory := resolver.DetectCategory(modelName)
+			if modelCategory == "" {
+				modelCategory = detectSupplierCategoryWithRules(resolver.rules, target.LocalGroup, target.UpstreamGroup, modelName)
+			}
+			rule, hasRule := getSupplierProviderRuleByCategory(modelCategory, resolver.rules)
+			vendorName := ""
+			if hasRule {
+				vendorName = rule.VendorName
+			}
+			vendorID := ensureSupplierVendor(vendorName, vendorIDCache)
+
+			if _, exists := processed[modelName]; exists {
+				continue
+			}
+			processed[modelName] = struct{}{}
+
+			var existing model.Model
+			if err := model.DB.Where("model_name = ?", modelName).First(&existing).Error; err == nil {
+				changed := false
+				if vendorID > 0 && (existing.VendorID == 0 || (existing.SyncOfficial == 0 && existing.VendorID != vendorID)) {
+					existing.VendorID = vendorID
+					changed = true
+				}
+				if existing.Status == 0 {
+					existing.Status = 1
+					changed = true
+				}
+				if changed {
+					if err := existing.Update(); err != nil {
+						warnings = append(warnings, fmt.Sprintf("更新模型 %s 失败: %v", modelName, err))
+					} else {
+						updated++
+					}
+				}
+				continue
+			}
+
+			newModel := &model.Model{
+				ModelName:    modelName,
+				VendorID:     vendorID,
+				Status:       1,
+				NameRule:     model.NameRuleExact,
+				SyncOfficial: 0,
+			}
+			if err := newModel.Insert(); err != nil {
+				warnings = append(warnings, fmt.Sprintf("创建模型 %s 失败: %v", modelName, err))
+				continue
+			}
+			created++
+		}
+	}
+
+	if created > 0 || updated > 0 {
+		model.RefreshPricing()
+	}
+	return created, updated, warnings
+}
+
+func inferChannelTypeByModels(models []string, resolver *supplierModelResolver, fallback int) int {
+	if resolver == nil {
+		return fallback
+	}
+	countByType := make(map[int]int)
+	for _, modelName := range normalizeModelNames(models) {
+		category := resolver.DetectCategory(modelName)
+		rule, exists := getSupplierProviderRuleByCategory(category, resolver.rules)
+		if !exists || rule.ChannelType == 0 {
+			continue
+		}
+		countByType[rule.ChannelType]++
+	}
+	bestType := 0
+	bestCount := 0
+	for channelType, count := range countByType {
+		if count > bestCount {
+			bestType = channelType
+			bestCount = count
+		}
+	}
+	if bestType != 0 {
+		return bestType
+	}
+	return fallback
+}
+
+func findLocalGroupInfo(localGroups []LocalGroupInfo, groupName string) (LocalGroupInfo, bool) {
+	groupName = strings.TrimSpace(groupName)
+	for _, localGroup := range localGroups {
+		if strings.TrimSpace(localGroup.Name) == groupName {
+			return localGroup, true
+		}
+	}
+	return LocalGroupInfo{}, false
+}
+
+func pickNearestLocalGroup(candidates []LocalGroupInfo, upstreamRatio float64) string {
+	var bestMatch string
+	minDiff := -1.0
+	for _, candidate := range candidates {
+		diff := candidate.Ratio - upstreamRatio
+		if diff < 0 {
+			diff = -diff
+		}
+		if minDiff < 0 || diff < minDiff {
+			minDiff = diff
+			bestMatch = candidate.Name
+		}
+	}
+	return bestMatch
+}
+
+func ensureSupplierLocalGroup(category string, upstreamRatio float64, localGroups *[]LocalGroupInfo, localGroupSet map[string]struct{}) string {
+	category = strings.TrimSpace(category)
+	if category == "" {
+		return ""
+	}
+	baseName := category
+	if _, exists := localGroupSet[baseName]; !exists {
+		*localGroups = append(*localGroups, LocalGroupInfo{Name: baseName, Ratio: roundRatio(upstreamRatio), Category: category})
+		localGroupSet[baseName] = struct{}{}
+		return baseName
+	}
+	for index := 1; index < 1000; index++ {
+		candidate := fmt.Sprintf("%s-%d", baseName, index)
+		if _, exists := localGroupSet[candidate]; exists {
+			continue
+		}
+		*localGroups = append(*localGroups, LocalGroupInfo{Name: candidate, Ratio: roundRatio(upstreamRatio), Category: category})
+		localGroupSet[candidate] = struct{}{}
+		return candidate
+	}
+	return ""
+}
+
+func resolveSupplierLocalGroup(existingLocalGroup string, upstreamGroup string, upstreamRatio float64, category string, localGroups *[]LocalGroupInfo, localGroupSet map[string]struct{}) string {
+	existingLocalGroup = strings.TrimSpace(existingLocalGroup)
+	if existingLocalGroup != "" {
+		if _, exists := localGroupSet[existingLocalGroup]; exists {
+			return existingLocalGroup
+		}
+	}
+
+	if exact, exists := findLocalGroupInfo(*localGroups, upstreamGroup); exists {
+		if category == "" || exact.Category == category {
+			return exact.Name
+		}
+	}
+
+	categories := make([]string, 0, 2)
+	if category != "" {
+		categories = append(categories, category)
+	}
+	if upstreamCategory := detectSupplierCategory(upstreamGroup); upstreamCategory != "" && upstreamCategory != category {
+		categories = append(categories, upstreamCategory)
+	}
+
+	for _, currentCategory := range categories {
+		candidates := make([]LocalGroupInfo, 0)
+		for _, localGroup := range *localGroups {
+			if localGroup.Category == currentCategory {
+				candidates = append(candidates, localGroup)
+			}
+		}
+		if len(candidates) > 0 {
+			return pickNearestLocalGroup(candidates, upstreamRatio)
+		}
+		if created := ensureSupplierLocalGroup(currentCategory, upstreamRatio, localGroups, localGroupSet); created != "" {
+			return created
+		}
+	}
+
+	if len(*localGroups) > 0 {
+		return pickNearestLocalGroup(*localGroups, upstreamRatio)
+	}
+	return ""
+}
+
+func buildSupplierChannelSyncKey(upstreamGroup string, localGroup string) string {
+	return strings.TrimSpace(upstreamGroup) + "||" + strings.TrimSpace(localGroup)
+}
+
+func buildSupplierChannelName(supplierName string, upstreamGroup string, localGroup string, multiTarget bool) string {
+	base := fmt.Sprintf("%s-%s", strings.TrimSpace(supplierName), strings.TrimSpace(upstreamGroup))
+	if !multiTarget || strings.TrimSpace(localGroup) == "" {
+		return base
+	}
+	return fmt.Sprintf("%s-%s", base, strings.TrimSpace(localGroup))
+}
+
+func getSupplierChannelSyncKey(channel *model.Channel) string {
+	if channel == nil {
+		return ""
+	}
+	otherInfo := channel.GetOtherInfo()
+	if value, ok := otherInfo[supplierChannelSyncKeyField].(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+func stampSupplierChannelOtherInfo(channel *model.Channel, target supplierChannelTarget) {
+	if channel == nil {
+		return
+	}
+	otherInfo := channel.GetOtherInfo()
+	otherInfo[supplierChannelSyncKeyField] = target.SyncKey
+	otherInfo[supplierChannelUpstreamGroupField] = target.UpstreamGroup
+	otherInfo[supplierChannelLocalGroupField] = target.LocalGroup
+	channel.SetOtherInfo(otherInfo)
+}
+
+func buildSupplierChannelTargets(supplier *model.Supplier, groups []*model.SupplierGroup, localGroups *[]LocalGroupInfo, localGroupSet map[string]struct{}, resolver *supplierModelResolver) (map[string]supplierChannelTarget, map[int]int, []string) {
+	targets := make(map[string]supplierChannelTarget)
+	targetCountByGroupID := make(map[int]int)
+	warnings := make([]string, 0)
+
+	for _, group := range groups {
+		if group == nil {
+			continue
+		}
+
+		upstreamModels := normalizeModelNames(strings.Split(strings.TrimSpace(group.SupportedModels), ","))
+		modelsByCategory := make(map[string][]string)
+		unclassifiedModels := make([]string, 0)
+		for _, modelName := range upstreamModels {
+			category := resolver.DetectCategory(modelName)
+			if category == "" {
+				unclassifiedModels = append(unclassifiedModels, modelName)
+				continue
+			}
+			modelsByCategory[category] = append(modelsByCategory[category], modelName)
+		}
+
+		categories := make([]string, 0, len(modelsByCategory))
+		for category := range modelsByCategory {
+			categories = append(categories, category)
+		}
+		sort.Strings(categories)
+
+		primaryCategory := detectSupplierCategory(group.LocalGroup)
+		if primaryCategory == "" && len(categories) == 1 {
+			primaryCategory = categories[0]
+		}
+		if primaryCategory == "" {
+			primaryCategory = detectSupplierCategory(group.UpstreamGroup)
+		}
+
+		resolvedPrimaryLocalGroup := resolveSupplierLocalGroup(group.LocalGroup, group.UpstreamGroup, group.GroupRatio, primaryCategory, localGroups, localGroupSet)
+		if strings.TrimSpace(resolvedPrimaryLocalGroup) != strings.TrimSpace(group.LocalGroup) && strings.TrimSpace(resolvedPrimaryLocalGroup) != "" {
+			group.LocalGroup = resolvedPrimaryLocalGroup
+		}
+
+		if len(categories) == 0 {
+			if resolvedPrimaryLocalGroup == "" {
+				continue
+			}
+			models := upstreamModels
+			if primaryCategory != "" {
+				models = mergeModelNames(models, resolver.CustomModelsForCategory(primaryCategory))
+			}
+			target := supplierChannelTarget{
+				SyncKey:       buildSupplierChannelSyncKey(group.UpstreamGroup, resolvedPrimaryLocalGroup),
+				Name:          buildSupplierChannelName(supplier.Name, group.UpstreamGroup, resolvedPrimaryLocalGroup, false),
+				UpstreamGroup: group.UpstreamGroup,
+				LocalGroup:    resolvedPrimaryLocalGroup,
+				Models:        normalizeModelNames(models),
+				ApiKey:        strings.TrimSpace(group.ApiKey),
+				ChannelType:   inferChannelTypeByModels(models, resolver, getChannelTypeByEndpointType(getSupplierGroupPreferredEndpointType(group))),
+				GroupRatio:    group.GroupRatio,
+				EndpointType:  getSupplierGroupPreferredEndpointType(group),
+				SourceGroup:   group,
+			}
+			targets[target.SyncKey] = target
+			targetCountByGroupID[group.Id]++
+			continue
+		}
+
+		for _, category := range categories {
+			localGroup := resolvedPrimaryLocalGroup
+			if len(categories) > 1 || localGroup == "" || detectSupplierCategory(localGroup) != category {
+				localGroup = resolveSupplierLocalGroup("", group.UpstreamGroup, group.GroupRatio, category, localGroups, localGroupSet)
+			}
+			if localGroup == "" {
+				continue
+			}
+
+			models := mergeModelNames(modelsByCategory[category], resolver.CustomModelsForCategory(category))
+			if localGroup == resolvedPrimaryLocalGroup && len(unclassifiedModels) > 0 {
+				models = mergeModelNames(models, unclassifiedModels)
+			}
+
+			target := supplierChannelTarget{
+				SyncKey:       buildSupplierChannelSyncKey(group.UpstreamGroup, localGroup),
+				Name:          buildSupplierChannelName(supplier.Name, group.UpstreamGroup, localGroup, len(categories) > 1),
+				UpstreamGroup: group.UpstreamGroup,
+				LocalGroup:    localGroup,
+				Models:        normalizeModelNames(models),
+				ApiKey:        strings.TrimSpace(group.ApiKey),
+				ChannelType:   inferChannelTypeByModels(models, resolver, getChannelTypeByEndpointType(getSupplierGroupPreferredEndpointType(group))),
+				GroupRatio:    group.GroupRatio,
+				EndpointType:  getSupplierGroupPreferredEndpointType(group),
+				SourceGroup:   group,
+			}
+
+			if existing, exists := targets[target.SyncKey]; exists {
+				existing.Models = mergeModelNames(existing.Models, target.Models)
+				if target.GroupRatio > existing.GroupRatio {
+					existing.ApiKey = target.ApiKey
+					existing.ChannelType = target.ChannelType
+					existing.GroupRatio = target.GroupRatio
+					existing.EndpointType = target.EndpointType
+					existing.SourceGroup = target.SourceGroup
+				}
+				targets[target.SyncKey] = existing
+			} else {
+				targets[target.SyncKey] = target
+			}
+			targetCountByGroupID[group.Id]++
+		}
+	}
+
+	return targets, targetCountByGroupID, warnings
+}
+
+func joinNormalizedModels(models []string) string {
+	return strings.Join(normalizeModelNames(models), ",")
+}
+
+func cloneSupplierGroups(groups []*model.SupplierGroup) []*model.SupplierGroup {
+	result := make([]*model.SupplierGroup, 0, len(groups))
+	for _, group := range groups {
+		if group == nil {
+			continue
+		}
+		copied := *group
+		result = append(result, &copied)
+	}
+	return result
+}
+
+func buildSupplierGroupResponse(supplier *model.Supplier, groups []*model.SupplierGroup) []gin.H {
+	items := make([]gin.H, 0, len(groups))
+	if supplier == nil {
+		for _, group := range groups {
+			if group == nil {
+				continue
+			}
+			items = append(items, gin.H{
+				"id":               group.Id,
+				"supplier_id":      group.SupplierID,
+				"upstream_group":   group.UpstreamGroup,
+				"api_key":          group.ApiKey,
+				"local_group":      group.LocalGroup,
+				"group_ratio":      group.GroupRatio,
+				"supported_models": group.SupportedModels,
+				"endpoint_type":    group.EndpointType,
+				"endpoint_types":   getSupplierGroupEndpointTypes(group),
+				"status":           group.Status,
+			})
+		}
+		return items
+	}
+
+	localGroups := getLocalGroups()
+	localGroupSet := make(map[string]struct{}, len(localGroups))
+	for _, localGroup := range localGroups {
+		localGroupSet[localGroup.Name] = struct{}{}
+	}
+	resolver := loadSupplierModelResolver()
+	clonedGroups := cloneSupplierGroups(groups)
+	targets, _, _ := buildSupplierChannelTargets(supplier, clonedGroups, &localGroups, localGroupSet, resolver)
+	targetsByGroupID := make(map[int][]gin.H)
+	for _, target := range targets {
+		if target.SourceGroup == nil {
+			continue
+		}
+		category := detectSupplierCategoryWithRules(resolver.rules, target.LocalGroup, target.UpstreamGroup, strings.Join(target.Models, ","))
+		rule, _ := getSupplierProviderRuleByCategory(category, resolver.rules)
+		targetsByGroupID[target.SourceGroup.Id] = append(targetsByGroupID[target.SourceGroup.Id], gin.H{
+			"sync_key":          target.SyncKey,
+			"local_group":       target.LocalGroup,
+			"vendor_name":       rule.VendorName,
+			"category":          category,
+			"channel_type":      target.ChannelType,
+			"channel_type_name": constant.GetChannelTypeName(target.ChannelType),
+			"models_count":      len(normalizeModelNames(target.Models)),
+			"models":            joinNormalizedModels(target.Models),
+			"upstream_group":    target.UpstreamGroup,
+		})
+	}
+
+	for _, group := range groups {
+		if group == nil {
+			continue
+		}
+		previewTargets := targetsByGroupID[group.Id]
+		previewLocalGroups := make([]string, 0, len(previewTargets))
+		previewVendors := make([]string, 0, len(previewTargets))
+		previewTypes := make([]int, 0, len(previewTargets))
+		for _, target := range previewTargets {
+			if localGroup, ok := target["local_group"].(string); ok && strings.TrimSpace(localGroup) != "" {
+				previewLocalGroups = append(previewLocalGroups, localGroup)
+			}
+			if vendorName, ok := target["vendor_name"].(string); ok && strings.TrimSpace(vendorName) != "" {
+				previewVendors = append(previewVendors, vendorName)
+			}
+			if channelType, ok := target["channel_type"].(int); ok {
+				previewTypes = append(previewTypes, channelType)
+			}
+		}
+		items = append(items, gin.H{
+			"id":                   group.Id,
+			"supplier_id":          group.SupplierID,
+			"upstream_group":       group.UpstreamGroup,
+			"api_key":              group.ApiKey,
+			"local_group":          group.LocalGroup,
+			"group_ratio":          group.GroupRatio,
+			"supported_models":     group.SupportedModels,
+			"endpoint_type":        group.EndpointType,
+			"endpoint_types":       getSupplierGroupEndpointTypes(group),
+			"status":               group.Status,
+			"target_channels":      previewTargets,
+			"target_local_groups":  previewLocalGroups,
+			"target_vendor_names":  previewVendors,
+			"target_channel_types": previewTypes,
+		})
+	}
+	return items
+}
+
+func persistSupplierGroupLocalMappings(groups []*model.SupplierGroup) []string {
+	warnings := make([]string, 0)
+	for _, group := range groups {
+		if group == nil || group.Id <= 0 || strings.TrimSpace(group.LocalGroup) == "" {
+			continue
+		}
+		if err := model.UpdateSupplierGroup(group); err != nil {
+			warnings = append(warnings, fmt.Sprintf("更新分组 %s 的本地映射失败: %v", group.UpstreamGroup, err))
+		}
+	}
+	return warnings
+}
+
+func reconcileSupplierChannels(supplier *model.Supplier, targets map[string]supplierChannelTarget) (int, int, int, []string) {
+	warnings := make([]string, 0)
+	existingChannels, _ := model.GetChannelsBySupplierID(supplier.Id)
+	allRefs := make([]*supplierExistingChannelRef, 0, len(existingChannels))
+	existingBySyncKey := make(map[string][]*supplierExistingChannelRef)
+	existingByLocalGroup := make(map[string][]*supplierExistingChannelRef)
+	for _, channel := range existingChannels {
+		if channel == nil {
+			continue
+		}
+		ref := &supplierExistingChannelRef{Channel: channel}
+		allRefs = append(allRefs, ref)
+		syncKey := getSupplierChannelSyncKey(channel)
+		if syncKey != "" {
+			existingBySyncKey[syncKey] = append(existingBySyncKey[syncKey], ref)
+		}
+		localGroup := strings.TrimSpace(channel.Group)
+		existingByLocalGroup[localGroup] = append(existingByLocalGroup[localGroup], ref)
+	}
+
+	targetKeys := make([]string, 0, len(targets))
+	for syncKey := range targets {
+		targetKeys = append(targetKeys, syncKey)
+	}
+	sort.Strings(targetKeys)
+
+	channelsCreated := 0
+	channelsUpdated := 0
+	channelsDeleted := 0
+
+	for _, syncKey := range targetKeys {
+		target := targets[syncKey]
+		if strings.TrimSpace(target.ApiKey) == "" {
+			warnings = append(warnings, fmt.Sprintf("本地分组 %s 未获取到可用密钥，跳过本次渠道更新（上游分组: %s）", target.LocalGroup, target.UpstreamGroup))
+			continue
+		}
+
+		models := joinNormalizedModels(target.Models)
+		if models == "" {
+			warnings = append(warnings, fmt.Sprintf("本地分组 %s 未识别到可用模型，跳过渠道更新并清理旧渠道（上游分组: %s）", target.LocalGroup, target.UpstreamGroup))
+			continue
+		}
+		refs := existingBySyncKey[syncKey]
+		var mainRef *supplierExistingChannelRef
+		if len(refs) > 0 {
+			mainRef = refs[0]
+		}
+		if mainRef == nil {
+			for _, ref := range existingByLocalGroup[target.LocalGroup] {
+				if ref == nil || ref.Matched {
+					continue
+				}
+				existingSyncKey := getSupplierChannelSyncKey(ref.Channel)
+				if existingSyncKey != "" && existingSyncKey != syncKey {
+					continue
+				}
+				mainRef = ref
+				break
+			}
+		}
+
+		if mainRef == nil {
+			channel := &model.Channel{
+				Type:       target.ChannelType,
+				Key:        target.ApiKey,
+				Name:       target.Name,
+				BaseURL:    &supplier.BaseURL,
+				Group:      target.LocalGroup,
+				Models:     models,
+				Status:     common.ChannelStatusEnabled,
+				SupplierID: supplier.Id,
+			}
+			stampSupplierChannelOtherInfo(channel, target)
+			if err := channel.Insert(); err != nil {
+				warnings = append(warnings, fmt.Sprintf("创建渠道 %s 失败: %v", target.Name, err))
+				continue
+			}
+			channelsCreated++
+			continue
+		}
+
+		mainRef.Matched = true
+		mainChannel := mainRef.Channel
+		changed := false
+		originalOtherInfo := mainChannel.OtherInfo
+		stampSupplierChannelOtherInfo(mainChannel, target)
+		if originalOtherInfo != mainChannel.OtherInfo {
+			changed = true
+		}
+		if mainChannel.Key != target.ApiKey {
+			mainChannel.Key = target.ApiKey
+			changed = true
+		}
+		if mainChannel.Name != target.Name {
+			mainChannel.Name = target.Name
+			changed = true
+		}
+		if strings.TrimSpace(mainChannel.Group) != target.LocalGroup {
+			mainChannel.Group = target.LocalGroup
+			changed = true
+		}
+		if mainChannel.Models != models {
+			mainChannel.Models = models
+			changed = true
+		}
+		if mainChannel.Type != target.ChannelType {
+			mainChannel.Type = target.ChannelType
+			changed = true
+		}
+		if mainChannel.BaseURL == nil || strings.TrimSpace(*mainChannel.BaseURL) != supplier.BaseURL {
+			mainChannel.BaseURL = &supplier.BaseURL
+			changed = true
+		}
+		if mainChannel.SupplierID != supplier.Id {
+			mainChannel.SupplierID = supplier.Id
+			changed = true
+		}
+		if mainChannel.Status != common.ChannelStatusEnabled {
+			mainChannel.Status = common.ChannelStatusEnabled
+			changed = true
+		}
+		if changed {
+			if err := mainChannel.Update(); err != nil {
+				warnings = append(warnings, fmt.Sprintf("更新渠道 %s 失败: %v", target.Name, err))
+			} else {
+				channelsUpdated++
+			}
+		}
+
+		if len(refs) > 1 {
+			for _, extraRef := range refs[1:] {
+				if extraRef == nil || extraRef.Channel == nil || extraRef.Matched {
+					continue
+				}
+				extraRef.Matched = true
+				if err := extraRef.Channel.Delete(); err != nil {
+					warnings = append(warnings, fmt.Sprintf("删除重复渠道 %d(%s) 失败: %v", extraRef.Channel.Id, target.Name, err))
+					continue
+				}
+				channelsDeleted++
+			}
+		}
+	}
+
+	for _, ref := range allRefs {
+		if ref == nil || ref.Channel == nil || ref.Matched {
+			continue
+		}
+		if err := ref.Channel.Delete(); err != nil {
+			warnings = append(warnings, fmt.Sprintf("删除渠道 %d(%s) 失败: %v", ref.Channel.Id, ref.Channel.Name, err))
+			continue
+		}
+		channelsDeleted++
+	}
+
+	return channelsCreated, channelsUpdated, channelsDeleted, warnings
 }
 
 func parseStringArray(raw interface{}) []string {
@@ -499,6 +1458,10 @@ func parsePricingResponse(body []byte) (*UpstreamPricingInfo, error) {
 		GroupEndpointTypes: make(map[string][]string),
 		UsableGroup:        make(map[string]string),
 		AllModels:          make([]string, 0),
+		ModelRatios:        make(map[string]float64),
+		CompletionRatios:   make(map[string]float64),
+		ModelPrices:        make(map[string]float64),
+		CacheRatios:        make(map[string]float64),
 	}
 
 	groupModelSet := make(map[string]map[string]struct{})
@@ -567,6 +1530,25 @@ func parsePricingResponse(body []byte) (*UpstreamPricingInfo, error) {
 				modelName = strings.TrimSpace(modelName)
 				enableGroups := parseStringArray(itemMap["enable_groups"])
 				endpointTypes := normalizeEndpointTypes(itemMap["supported_endpoint_types"])
+
+				quotaTypeRaw, hasQuotaType := getFloatFromAny(itemMap["quota_type"])
+				if modelName != "" {
+					if hasQuotaType && int(quotaTypeRaw) == 1 {
+						if modelPrice, ok := getFloatFromAny(itemMap["model_price"]); ok && modelPrice >= 0 {
+							info.ModelPrices[modelName] = roundRatio(modelPrice)
+						}
+					} else {
+						if modelRatio, ok := getFloatFromAny(itemMap["model_ratio"]); ok && modelRatio >= 0 {
+							info.ModelRatios[modelName] = roundRatio(modelRatio)
+						}
+						if completionRatio, ok := getFloatFromAny(itemMap["completion_ratio"]); ok && completionRatio >= 0 {
+							info.CompletionRatios[modelName] = roundRatio(completionRatio)
+						}
+						if cacheRatio, ok := getFloatFromAny(itemMap["cache_ratio"]); ok && cacheRatio >= 0 {
+							info.CacheRatios[modelName] = roundRatio(cacheRatio)
+						}
+					}
+				}
 
 				for _, groupName := range enableGroups {
 					groupName = strings.TrimSpace(groupName)
@@ -686,59 +1668,33 @@ func fetchUpstreamPricing(client *http.Client, supplier *model.Supplier) (*Upstr
 // - 上游名称包含 gemini → 对应本地 gemini 开头分组
 // - 确认分组范围后，找倍率最接近的去对应
 func autoMapLocalGroup(upstreamGroup string, upstreamRatio float64, localGroups []LocalGroupInfo) string {
-	upstreamLower := strings.ToLower(upstreamGroup)
-
-	// 确定分组类别
-	var category string
-	if strings.Contains(upstreamLower, "cc") || strings.Contains(upstreamLower, "claude") {
-		category = "cc"
-	} else if strings.Contains(upstreamLower, "codex") || strings.Contains(upstreamLower, "openai") {
-		category = "codex"
-	} else if strings.Contains(upstreamLower, "gemini") {
-		category = "gemini"
-	} else {
-		// 无法分类，不自动映射
+	if exact, exists := findLocalGroupInfo(localGroups, upstreamGroup); exists {
+		return exact.Name
+	}
+	category := detectSupplierCategory(upstreamGroup)
+	if category == "" {
 		return ""
 	}
-
-	// 筛选同类别的本地分组
-	var candidates []LocalGroupInfo
-	for _, lg := range localGroups {
-		lgLower := strings.ToLower(lg.Name)
-		if category == "cc" && strings.HasPrefix(lgLower, "cc") {
-			candidates = append(candidates, lg)
-		} else if category == "codex" && strings.HasPrefix(lgLower, "codex") {
-			candidates = append(candidates, lg)
-		} else if category == "gemini" && strings.HasPrefix(lgLower, "gemini") {
-			candidates = append(candidates, lg)
+	candidates := make([]LocalGroupInfo, 0)
+	for _, localGroup := range localGroups {
+		if localGroup.Category == "" {
+			localGroup.Category = detectSupplierCategory(localGroup.Name)
+		}
+		if localGroup.Category == category {
+			candidates = append(candidates, localGroup)
 		}
 	}
-
 	if len(candidates) == 0 {
 		return ""
 	}
-
-	// 找倍率最接近的
-	var bestMatch string
-	minDiff := -1.0
-	for _, c := range candidates {
-		diff := c.Ratio - upstreamRatio
-		if diff < 0 {
-			diff = -diff
-		}
-		if minDiff < 0 || diff < minDiff {
-			minDiff = diff
-			bestMatch = c.Name
-		}
-	}
-
-	return bestMatch
+	return pickNearestLocalGroup(candidates, upstreamRatio)
 }
 
 // LocalGroupInfo 本地分组信息
 type LocalGroupInfo struct {
-	Name  string
-	Ratio float64
+	Name     string
+	Ratio    float64
+	Category string
 }
 
 // getLocalGroups 获取本地分组列表及其倍率
@@ -746,7 +1702,11 @@ func getLocalGroups() []LocalGroupInfo {
 	ratioMap := ratio_setting.GetGroupRatioCopy()
 	result := make([]LocalGroupInfo, 0, len(ratioMap))
 	for name, ratio := range ratioMap {
-		result = append(result, LocalGroupInfo{Name: name, Ratio: roundRatio(ratio)})
+		result = append(result, LocalGroupInfo{
+			Name:     name,
+			Ratio:    roundRatio(ratio),
+			Category: detectSupplierCategory(name),
+		})
 	}
 	return result
 }
@@ -785,6 +1745,207 @@ func roundRatio(ratio float64) float64 {
 	return math.Round(ratio*1000) / 1000
 }
 
+func isSuspiciousSupplierPricing(modelName string, modelRatio float64, completionRatio float64) bool {
+	normalized := ratio_setting.FormatMatchingModelName(strings.TrimSpace(modelName))
+	_, exists := ratio_setting.GetDefaultModelRatioMap()[normalized]
+	if exists {
+		return false
+	}
+	if roundRatio(modelRatio) != 37.5 {
+		return false
+	}
+	return completionRatio <= 0 || completionRatio == 1 || completionRatio == 5
+}
+
+func hasLocalDefaultPricing(modelName string) bool {
+	normalized := ratio_setting.FormatMatchingModelName(strings.TrimSpace(modelName))
+	if normalized == "" {
+		return false
+	}
+	if _, exists := ratio_setting.GetDefaultModelRatioMap()[normalized]; exists {
+		return true
+	}
+	if _, exists := ratio_setting.GetDefaultModelPriceMap()[normalized]; exists {
+		return true
+	}
+	return false
+}
+
+func shouldSkipUnknownSupplierPricing(modelName string, modelRatio float64, completionRatio float64) (bool, string) {
+	if hasLocalDefaultPricing(modelName) {
+		return true, "本地已有标准售价"
+	}
+	if isSuspiciousSupplierPricing(modelName, modelRatio, completionRatio) {
+		return true, fmt.Sprintf("上游返回疑似兜底倍率 %.3f/%.3f", modelRatio, completionRatio)
+	}
+	if roundRatio(modelRatio) >= 20 && completionRatio <= 1 {
+		return true, fmt.Sprintf("上游返回高成本倍率 %.3f/%.3f，本地未配置标准售价", modelRatio, completionRatio)
+	}
+	return false, ""
+}
+
+func syncSupplierModelPricing(info *UpstreamPricingInfo, targets map[string]supplierChannelTarget) (int, []string) {
+	if info == nil || len(targets) == 0 {
+		return 0, nil
+	}
+	persistOptions := model.DB != nil
+	targetModelSet := make(map[string]struct{})
+	for _, target := range targets {
+		for _, modelName := range normalizeModelNames(target.Models) {
+			targetModelSet[modelName] = struct{}{}
+		}
+	}
+	if len(targetModelSet) == 0 {
+		return 0, nil
+	}
+
+	modelRatios := ratio_setting.GetModelRatioCopy()
+	completionRatios := ratio_setting.GetCompletionRatioCopy()
+	modelPrices := ratio_setting.GetModelPriceCopy()
+	cacheRatios := ratio_setting.GetCacheRatioCopy()
+
+	warnings := make([]string, 0)
+	changedModelRatio := false
+	changedCompletionRatio := false
+	changedModelPrice := false
+	changedCacheRatio := false
+	updatedModels := make(map[string]struct{})
+
+	for modelName := range targetModelSet {
+		if hasLocalDefaultPricing(modelName) {
+			if _, exists := modelPrices[modelName]; exists {
+				delete(modelPrices, modelName)
+				changedModelPrice = true
+			}
+			if _, exists := modelRatios[modelName]; exists {
+				delete(modelRatios, modelName)
+				changedModelRatio = true
+			}
+			if _, exists := completionRatios[modelName]; exists {
+				delete(completionRatios, modelName)
+				changedCompletionRatio = true
+			}
+			continue
+		}
+
+		if price, ok := info.ModelPrices[modelName]; ok && price >= 0 {
+			if current, exists := modelPrices[modelName]; !exists || current != price {
+				modelPrices[modelName] = price
+				changedModelPrice = true
+			}
+			if _, exists := modelRatios[modelName]; exists {
+				delete(modelRatios, modelName)
+				changedModelRatio = true
+			}
+			if _, exists := completionRatios[modelName]; exists {
+				delete(completionRatios, modelName)
+				changedCompletionRatio = true
+			}
+			updatedModels[modelName] = struct{}{}
+			continue
+		}
+
+		modelRatio, hasModelRatio := info.ModelRatios[modelName]
+		completionRatio, hasCompletionRatio := info.CompletionRatios[modelName]
+		if hasModelRatio {
+			if skip, reason := shouldSkipUnknownSupplierPricing(modelName, modelRatio, completionRatio); skip {
+				if _, exists := modelRatios[modelName]; exists {
+					delete(modelRatios, modelName)
+					changedModelRatio = true
+				}
+				if _, exists := completionRatios[modelName]; exists {
+					delete(completionRatios, modelName)
+					changedCompletionRatio = true
+				}
+				if _, exists := modelPrices[modelName]; exists {
+					delete(modelPrices, modelName)
+					changedModelPrice = true
+				}
+				warnings = append(warnings, fmt.Sprintf("模型 %s %s，已跳过价格同步", modelName, reason))
+				continue
+			}
+			if current, exists := modelRatios[modelName]; !exists || current != modelRatio {
+				modelRatios[modelName] = modelRatio
+				changedModelRatio = true
+			}
+			if _, exists := modelPrices[modelName]; exists {
+				delete(modelPrices, modelName)
+				changedModelPrice = true
+			}
+			updatedModels[modelName] = struct{}{}
+		}
+		if hasCompletionRatio {
+			if current, exists := completionRatios[modelName]; !exists || current != completionRatio {
+				completionRatios[modelName] = completionRatio
+				changedCompletionRatio = true
+			}
+		}
+		if cacheRatio, ok := info.CacheRatios[modelName]; ok {
+			if current, exists := cacheRatios[modelName]; !exists || current != cacheRatio {
+				cacheRatios[modelName] = cacheRatio
+				changedCacheRatio = true
+			}
+		}
+	}
+
+	if !changedModelRatio && !changedCompletionRatio && !changedModelPrice && !changedCacheRatio {
+		return len(updatedModels), warnings
+	}
+
+	if changedModelRatio {
+		jsonBytes, err := common.Marshal(modelRatios)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("序列化 ModelRatio 失败: %v", err))
+		} else if persistOptions {
+			if err := model.UpdateOption("ModelRatio", string(jsonBytes)); err != nil {
+				warnings = append(warnings, fmt.Sprintf("保存 ModelRatio 失败: %v", err))
+			}
+		} else if err := ratio_setting.UpdateModelRatioByJSONString(string(jsonBytes)); err != nil {
+			warnings = append(warnings, fmt.Sprintf("应用 ModelRatio 失败: %v", err))
+		}
+	}
+	if changedCompletionRatio {
+		jsonBytes, err := common.Marshal(completionRatios)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("序列化 CompletionRatio 失败: %v", err))
+		} else if persistOptions {
+			if err := model.UpdateOption("CompletionRatio", string(jsonBytes)); err != nil {
+				warnings = append(warnings, fmt.Sprintf("保存 CompletionRatio 失败: %v", err))
+			}
+		} else if err := ratio_setting.UpdateCompletionRatioByJSONString(string(jsonBytes)); err != nil {
+			warnings = append(warnings, fmt.Sprintf("应用 CompletionRatio 失败: %v", err))
+		}
+	}
+	if changedModelPrice {
+		jsonBytes, err := common.Marshal(modelPrices)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("序列化 ModelPrice 失败: %v", err))
+		} else if persistOptions {
+			if err := model.UpdateOption("ModelPrice", string(jsonBytes)); err != nil {
+				warnings = append(warnings, fmt.Sprintf("保存 ModelPrice 失败: %v", err))
+			}
+		} else if err := ratio_setting.UpdateModelPriceByJSONString(string(jsonBytes)); err != nil {
+			warnings = append(warnings, fmt.Sprintf("应用 ModelPrice 失败: %v", err))
+		}
+	}
+	if changedCacheRatio {
+		jsonBytes, err := common.Marshal(cacheRatios)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("序列化 CacheRatio 失败: %v", err))
+		} else if persistOptions {
+			if err := model.UpdateOption("CacheRatio", string(jsonBytes)); err != nil {
+				warnings = append(warnings, fmt.Sprintf("保存 CacheRatio 失败: %v", err))
+			}
+		} else if err := ratio_setting.UpdateCacheRatioByJSONString(string(jsonBytes)); err != nil {
+			warnings = append(warnings, fmt.Sprintf("应用 CacheRatio 失败: %v", err))
+		}
+	}
+	if len(updatedModels) > 0 && persistOptions {
+		model.RefreshPricing()
+	}
+	return len(updatedModels), warnings
+}
+
 func getChannelTypeByEndpointType(endpointType string) int {
 	switch normalizeEndpointType(endpointType) {
 	case string(constant.EndpointTypeAnthropic):
@@ -797,13 +1958,13 @@ func getChannelTypeByEndpointType(endpointType string) int {
 }
 
 // syncSupplierGroupsFromUpstream 同步供应商分组（仅采集，不修改本地 GroupRatio）
-func syncSupplierGroupsFromUpstream(client *http.Client, supplier *model.Supplier) ([]*model.SupplierGroup, int, int, int, int, error) {
+func syncSupplierGroupsFromUpstream(client *http.Client, supplier *model.Supplier) ([]*model.SupplierGroup, *UpstreamPricingInfo, int, int, int, int, error) {
 	info, err := fetchUpstreamPricing(client, supplier)
 	if err != nil {
-		return nil, 0, 0, 0, 0, err
+		return nil, nil, 0, 0, 0, 0, err
 	}
 	if len(info.Groups) == 0 {
-		return nil, 0, 0, 0, 0, fmt.Errorf("上游 pricing 未返回可用分组，已中止同步以避免误删")
+		return nil, info, 0, 0, 0, 0, fmt.Errorf("上游 pricing 未返回可用分组，已中止同步以避免误删")
 	}
 
 	// 获取本地分组用于自动映射
@@ -918,7 +2079,7 @@ func syncSupplierGroupsFromUpstream(client *http.Client, supplier *model.Supplie
 	}
 
 	groups, _ := model.GetSupplierGroups(supplier.Id)
-	return groups, len(info.Groups), added, updated, removed, nil
+	return groups, info, len(info.Groups), added, updated, removed, nil
 }
 
 func buildSupplierGroupTokenName(supplierID int, upstreamGroup string) string {
@@ -1317,9 +2478,10 @@ func GetSupplierGroups(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
 		return
 	}
+	supplier, _ := model.GetSupplierById(id)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"data":    groups,
+		"data":    buildSupplierGroupResponse(supplier, groups),
 	})
 }
 
@@ -1387,7 +2549,7 @@ func FetchSupplierGroups(c *gin.Context) {
 	}
 
 	client := &http.Client{Timeout: upstreamRequestTimeout}
-	groups, totalGroups, added, updated, removed, err := syncSupplierGroupsFromUpstream(client, supplier)
+	groups, _, totalGroups, added, updated, removed, err := syncSupplierGroupsFromUpstream(client, supplier)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
 		return
@@ -1396,7 +2558,7 @@ func FetchSupplierGroups(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": fmt.Sprintf("采集完成: %d个分组, 新增%d, 更新%d, 清理%d", totalGroups, added, updated, removed),
-		"data":    groups,
+		"data":    buildSupplierGroupResponse(supplier, groups),
 	})
 }
 
@@ -1413,7 +2575,7 @@ func FetchSupplierGroupsWithKeys(c *gin.Context) {
 	}
 
 	client := &http.Client{Timeout: upstreamRequestTimeout}
-	groups, totalGroups, added, updated, removed, err := syncSupplierGroupsFromUpstream(client, supplier)
+	groups, _, totalGroups, added, updated, removed, err := syncSupplierGroupsFromUpstream(client, supplier)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
 		return
@@ -1424,7 +2586,7 @@ func FetchSupplierGroupsWithKeys(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": fmt.Sprintf("分组采集成功，但自动创建密钥失败: %v", authErr),
-			"data":    groups,
+			"data":    buildSupplierGroupResponse(supplier, groups),
 		})
 		return
 	}
@@ -1441,7 +2603,7 @@ func FetchSupplierGroupsWithKeys(c *gin.Context) {
 	resp := gin.H{
 		"success":          len(failures) == 0,
 		"message":          message,
-		"data":             groups,
+		"data":             buildSupplierGroupResponse(supplier, groups),
 		"upstream_user_id": auth.userID,
 		"key_created":      created,
 		"key_reused":       reused,
@@ -1756,7 +2918,7 @@ func SyncSupplierFull(c *gin.Context) {
 
 	// Step 1: 采集分组
 	stepStartedAt := time.Now()
-	groups, totalGroups, groupsAdded, groupsUpdated, groupsRemoved, err := syncSupplierGroupsFromUpstream(client, supplier)
+	groups, upstreamPricingInfo, totalGroups, groupsAdded, groupsUpdated, groupsRemoved, err := syncSupplierGroupsFromUpstream(client, supplier)
 	if err != nil {
 		appendStep("sync_groups", false, stepStartedAt, err.Error())
 		c.JSON(http.StatusOK, gin.H{
@@ -1797,26 +2959,30 @@ func SyncSupplierFull(c *gin.Context) {
 	details["keys_reused"] = keysReused
 	details["keys_failed"] = keysFailed
 
-	// Step 3: 同步倍率到系统（只同步已映射且合法的本地分组，且不自动下调现有倍率）
+	// Step 3: 构建智能渠道目标并同步倍率
 	stepStartedAt = time.Now()
+	resolver := loadSupplierModelResolver()
+	channelTargets, targetCountByGroupID, targetWarnings := buildSupplierChannelTargets(supplier, groups, &localGroups, localGroupSet, resolver)
+	warnings = append(warnings, targetWarnings...)
+	warnings = append(warnings, persistSupplierGroupLocalMappings(groups)...)
+	groups, _ = model.GetSupplierGroups(id)
+	modelsCreated, modelsUpdated, modelWarnings := syncSupplierModelsToMeta(channelTargets, resolver)
+	warnings = append(warnings, modelWarnings...)
+	details["models_created"] = modelsCreated
+	details["models_updated"] = modelsUpdated
+
+	pricingSynced, pricingWarnings := syncSupplierModelPricing(upstreamPricingInfo, channelTargets)
+	warnings = append(warnings, pricingWarnings...)
+	details["model_pricing_synced"] = pricingSynced
+
 	candidateRatios := make(map[string]float64)
-	ratiosSkippedInvalidLocalGroup := 0
-	for _, group := range groups {
-		if group == nil {
+	for _, target := range channelTargets {
+		if strings.TrimSpace(target.LocalGroup) == "" {
 			continue
 		}
-		localGroup := strings.TrimSpace(group.LocalGroup)
-		if localGroup == "" {
-			continue
-		}
-		if _, exists := localGroupSet[localGroup]; !exists {
-			ratiosSkippedInvalidLocalGroup++
-			warnings = append(warnings, fmt.Sprintf("本地分组 %s 不存在于系统分组配置，跳过倍率同步（上游分组: %s）", localGroup, group.UpstreamGroup))
-			continue
-		}
-		finalRatio := roundRatio(group.GroupRatio * supplier.Markup)
-		if existingRatio, exists := candidateRatios[localGroup]; !exists || finalRatio > existingRatio {
-			candidateRatios[localGroup] = finalRatio
+		finalRatio := roundRatio(target.GroupRatio * supplier.Markup)
+		if existingRatio, exists := candidateRatios[target.LocalGroup]; !exists || finalRatio > existingRatio {
+			candidateRatios[target.LocalGroup] = finalRatio
 		}
 	}
 
@@ -1832,20 +2998,22 @@ func SyncSupplierFull(c *gin.Context) {
 			warnings = append(warnings, fmt.Sprintf("保存倍率失败: %v", err))
 		}
 	}
-	appendStep("sync_ratios", !ratioSyncFailed, stepStartedAt, fmt.Sprintf("同步%d个, 跳过%d个, 保留%d个", len(updatedRatios), ratiosSkippedInvalidLocalGroup, ratiosHeldForProtection))
+	appendStep("sync_ratios", !ratioSyncFailed, stepStartedAt, fmt.Sprintf("同步%d个, 目标渠道%d个, 模型+%d/~%d, 定价%d个, 保留%d个", len(updatedRatios), len(channelTargets), modelsCreated, modelsUpdated, pricingSynced, ratiosHeldForProtection))
 	details["ratios_synced"] = len(updatedRatios)
-	details["ratios_skipped_invalid_local_group"] = ratiosSkippedInvalidLocalGroup
+	details["ratios_skipped_invalid_local_group"] = 0
 	details["ratios_held_for_protection"] = ratiosHeldForProtection
+	details["channel_targets"] = len(channelTargets)
 
 	// Step 4: 统计未映射分组
 	unmappedGroups := make([]map[string]interface{}, 0)
 	for _, group := range groups {
-		if group == nil || strings.TrimSpace(group.LocalGroup) != "" {
+		if group == nil || targetCountByGroupID[group.Id] > 0 {
 			continue
 		}
 		unmappedGroups = append(unmappedGroups, map[string]interface{}{
 			"id":               group.Id,
 			"upstream_group":   group.UpstreamGroup,
+			"local_group":      group.LocalGroup,
 			"group_ratio":      group.GroupRatio,
 			"supported_models": group.SupportedModels,
 			"endpoint_type":    group.EndpointType,
@@ -1855,131 +3023,10 @@ func SyncSupplierFull(c *gin.Context) {
 	}
 	details["unmapped_count"] = len(unmappedGroups)
 
-	// Step 5: 渠道增改删对齐（上游无 -> 硬删除）
+	// Step 5: 渠道增改删对齐（支持一个上游分组拆分多个本地渠道）
 	stepStartedAt = time.Now()
-	existingChannels, _ := model.GetChannelsBySupplierID(id)
-	existingByGroup := make(map[string][]*model.Channel)
-	for _, ch := range existingChannels {
-		if ch == nil {
-			continue
-		}
-		groupName := strings.TrimSpace(ch.Group)
-		existingByGroup[groupName] = append(existingByGroup[groupName], ch)
-	}
-
-	targetGroups := make(map[string]*model.SupplierGroup)
-	activeMappedGroups := make(map[string]struct{})
-	for _, group := range groups {
-		if group == nil {
-			continue
-		}
-		localGroup := strings.TrimSpace(group.LocalGroup)
-		if localGroup == "" {
-			continue
-		}
-		if _, exists := localGroupSet[localGroup]; !exists {
-			continue
-		}
-		activeMappedGroups[localGroup] = struct{}{}
-		if strings.TrimSpace(group.ApiKey) == "" {
-			warnings = append(warnings, fmt.Sprintf("本地分组 %s 未获取到可用密钥，跳过本次渠道更新（上游分组: %s）", localGroup, group.UpstreamGroup))
-			continue
-		}
-		if existingGroup, exists := targetGroups[localGroup]; exists {
-			if group.GroupRatio > existingGroup.GroupRatio {
-				targetGroups[localGroup] = group
-			}
-			warnings = append(warnings, fmt.Sprintf("本地分组 %s 存在多个上游分组映射，按最高倍率保留（候选: %s）", localGroup, group.UpstreamGroup))
-			continue
-		}
-		targetGroups[localGroup] = group
-	}
-
-	channelsCreated := 0
-	channelsUpdated := 0
-	channelsDeleted := 0
-
-	for localGroup, group := range targetGroups {
-		endpointType := getSupplierGroupPreferredEndpointType(group)
-		channelType := getChannelTypeByEndpointType(endpointType)
-		models := strings.TrimSpace(group.SupportedModels)
-
-		existingList := existingByGroup[localGroup]
-		if len(existingList) == 0 {
-			channel := &model.Channel{
-				Type:        channelType,
-				Key:         group.ApiKey,
-				Name:        fmt.Sprintf("%s-%s", supplier.Name, localGroup),
-				BaseURL:     &supplier.BaseURL,
-				Group:       localGroup,
-				Models:      models,
-				Status:      common.ChannelStatusEnabled,
-				CreatedTime: common.GetTimestamp(),
-				SupplierID:  id,
-			}
-			if err := channel.Insert(); err != nil {
-				warnings = append(warnings, fmt.Sprintf("创建渠道 %s 失败: %v", localGroup, err))
-				continue
-			}
-			channelsCreated++
-			continue
-		}
-
-		mainChannel := existingList[0]
-		changed := false
-		if mainChannel.Key != group.ApiKey {
-			mainChannel.Key = group.ApiKey
-			changed = true
-		}
-		if mainChannel.Models != models {
-			mainChannel.Models = models
-			changed = true
-		}
-		if mainChannel.Type != channelType {
-			mainChannel.Type = channelType
-			changed = true
-		}
-		if mainChannel.BaseURL == nil || strings.TrimSpace(*mainChannel.BaseURL) != supplier.BaseURL {
-			mainChannel.BaseURL = &supplier.BaseURL
-			changed = true
-		}
-		if mainChannel.Status != common.ChannelStatusEnabled {
-			mainChannel.Status = common.ChannelStatusEnabled
-			changed = true
-		}
-		if changed {
-			if err := mainChannel.Update(); err != nil {
-				warnings = append(warnings, fmt.Sprintf("更新渠道 %s 失败: %v", localGroup, err))
-			} else {
-				channelsUpdated++
-			}
-		}
-
-		// 同组重复渠道清理：保留第一条，其余硬删除
-		if len(existingList) > 1 {
-			for _, extraChannel := range existingList[1:] {
-				if err := extraChannel.Delete(); err != nil {
-					warnings = append(warnings, fmt.Sprintf("删除重复渠道 %d(%s) 失败: %v", extraChannel.Id, localGroup, err))
-					continue
-				}
-				channelsDeleted++
-			}
-		}
-	}
-
-	// 删除上游已不存在的渠道（硬删除）
-	for localGroup, channelList := range existingByGroup {
-		if _, exists := activeMappedGroups[localGroup]; exists {
-			continue
-		}
-		for _, channel := range channelList {
-			if err := channel.Delete(); err != nil {
-				warnings = append(warnings, fmt.Sprintf("删除渠道 %d(%s) 失败: %v", channel.Id, localGroup, err))
-				continue
-			}
-			channelsDeleted++
-		}
-	}
+	channelsCreated, channelsUpdated, channelsDeleted, channelWarnings := reconcileSupplierChannels(supplier, channelTargets)
+	warnings = append(warnings, channelWarnings...)
 	appendStep("reconcile_channels", true, stepStartedAt, fmt.Sprintf("新增%d, 更新%d, 删除%d", channelsCreated, channelsUpdated, channelsDeleted))
 
 	details["channels_created"] = channelsCreated
@@ -1990,8 +3037,8 @@ func SyncSupplierFull(c *gin.Context) {
 	service.ResetProxyClientCache()
 
 	// 记录同步日志
-	logDetails := fmt.Sprintf("分组:+%d/~%d/-%d, 密钥:+%d/=%d, 倍率:%d, 渠道:+%d/~%d/-%d, 未映射:%d",
-		groupsAdded, groupsUpdated, groupsRemoved, keysCreated, keysReused, len(updatedRatios), channelsCreated, channelsUpdated, channelsDeleted, len(unmappedGroups))
+	logDetails := fmt.Sprintf("分组:+%d/~%d/-%d, 密钥:+%d/=%d, 倍率:%d, 定价:%d, 渠道:+%d/~%d/-%d, 未映射:%d",
+		groupsAdded, groupsUpdated, groupsRemoved, keysCreated, keysReused, len(updatedRatios), pricingSynced, channelsCreated, channelsUpdated, channelsDeleted, len(unmappedGroups))
 	model.CreateSyncLog(&model.SupplierGroupSyncLog{
 		SupplierID:   id,
 		SupplierName: supplier.Name,
@@ -1999,8 +3046,8 @@ func SyncSupplierFull(c *gin.Context) {
 		Details:      logDetails,
 	})
 
-	message := fmt.Sprintf("更新完成: 分组+%d/~%d/-%d, 密钥+%d/=%d, 渠道+%d/~%d/-%d, 未映射%d个",
-		groupsAdded, groupsUpdated, groupsRemoved, keysCreated, keysReused, channelsCreated, channelsUpdated, channelsDeleted, len(unmappedGroups))
+	message := fmt.Sprintf("更新完成: 分组+%d/~%d/-%d, 密钥+%d/=%d, 模型+%d/~%d, 定价同步%d个, 渠道+%d/~%d/-%d, 未映射%d个",
+		groupsAdded, groupsUpdated, groupsRemoved, keysCreated, keysReused, modelsCreated, modelsUpdated, pricingSynced, channelsCreated, channelsUpdated, channelsDeleted, len(unmappedGroups))
 	if len(unmappedGroups) > 0 {
 		message += "（请手动复核未映射分组）"
 	}
@@ -2012,7 +3059,7 @@ func SyncSupplierFull(c *gin.Context) {
 		"details":         details,
 		"steps":           steps,
 		"warnings":        warnings,
-		"groups":          groups,
+		"groups":          buildSupplierGroupResponse(supplier, groups),
 		"unmapped_groups": unmappedGroups,
 	})
 }
@@ -2047,74 +3094,89 @@ func BatchCreateChannels(c *gin.Context) {
 		return
 	}
 
-	// 获取现有渠道
-	existingChannels, _ := model.GetChannelsBySupplierID(id)
-	existingMap := make(map[string]bool) // local_group -> exists
-	for _, ch := range existingChannels {
-		existingMap[ch.Group] = true
-	}
-
-	// 获取所有分组
 	allGroups, _ := model.GetSupplierGroups(id)
 	groupMap := make(map[int]*model.SupplierGroup)
 	for _, g := range allGroups {
 		groupMap[g.Id] = g
 	}
 
-	var warnings []string
-	created := 0
-	skipped := 0
-
+	selectedGroups := make([]*model.SupplierGroup, 0, len(req.GroupIDs))
+	warnings := make([]string, 0)
 	for _, groupID := range req.GroupIDs {
 		group, exists := groupMap[groupID]
 		if !exists {
 			warnings = append(warnings, fmt.Sprintf("分组ID %d 不存在", groupID))
 			continue
 		}
+		selectedGroups = append(selectedGroups, group)
+	}
 
-		// 检查是否有本地分组映射
-		if strings.TrimSpace(group.LocalGroup) == "" {
-			warnings = append(warnings, fmt.Sprintf("分组 %s 未映射本地分组，跳过", group.UpstreamGroup))
+	localGroups := getLocalGroups()
+	localGroupSet := make(map[string]struct{}, len(localGroups))
+	for _, localGroup := range localGroups {
+		localGroupSet[localGroup.Name] = struct{}{}
+	}
+	resolver := loadSupplierModelResolver()
+	targets, _, targetWarnings := buildSupplierChannelTargets(supplier, selectedGroups, &localGroups, localGroupSet, resolver)
+	warnings = append(warnings, targetWarnings...)
+	warnings = append(warnings, persistSupplierGroupLocalMappings(selectedGroups)...)
+
+	existingChannels, _ := model.GetChannelsBySupplierID(id)
+	existingBySyncKey := make(map[string]struct{}, len(existingChannels))
+	for _, ch := range existingChannels {
+		if ch == nil {
+			continue
+		}
+		if syncKey := getSupplierChannelSyncKey(ch); syncKey != "" {
+			existingBySyncKey[syncKey] = struct{}{}
+		}
+	}
+
+	created := 0
+	skipped := 0
+	targetKeys := make([]string, 0, len(targets))
+	for syncKey := range targets {
+		targetKeys = append(targetKeys, syncKey)
+	}
+	sort.Strings(targetKeys)
+
+	for _, syncKey := range targetKeys {
+		target := targets[syncKey]
+		if strings.TrimSpace(target.LocalGroup) == "" {
+			warnings = append(warnings, fmt.Sprintf("分组 %s 未映射本地分组，跳过", target.UpstreamGroup))
+			skipped++
+			continue
+		}
+		if strings.TrimSpace(target.ApiKey) == "" {
+			warnings = append(warnings, fmt.Sprintf("分组 %s 没有API密钥，跳过", target.UpstreamGroup))
+			skipped++
+			continue
+		}
+		if _, exists := existingBySyncKey[syncKey]; exists {
+			warnings = append(warnings, fmt.Sprintf("渠道 %s 已存在，跳过", target.Name))
 			skipped++
 			continue
 		}
 
-		// 检查是否有API密钥
-		if strings.TrimSpace(group.ApiKey) == "" {
-			warnings = append(warnings, fmt.Sprintf("分组 %s 没有API密钥，跳过", group.UpstreamGroup))
-			skipped++
-			continue
-		}
-
-		// 检查渠道是否已存在
-		if existingMap[group.LocalGroup] {
-			warnings = append(warnings, fmt.Sprintf("本地分组 %s 的渠道已存在，跳过", group.LocalGroup))
-			skipped++
-			continue
-		}
-
-		// 创建渠道
-		endpointType := getSupplierGroupPreferredEndpointType(group)
-		channelType := getChannelTypeByEndpointType(endpointType)
 		channel := &model.Channel{
-			Type:        channelType,
-			Key:         group.ApiKey,
-			Name:        fmt.Sprintf("%s-%s", supplier.Name, group.LocalGroup),
-			BaseURL:     &supplier.BaseURL,
-			Group:       group.LocalGroup,
-			Models:      group.SupportedModels,
-			Status:      common.ChannelStatusEnabled,
-			CreatedTime: common.GetTimestamp(),
-			SupplierID:  id,
+			Type:       target.ChannelType,
+			Key:        target.ApiKey,
+			Name:       target.Name,
+			BaseURL:    &supplier.BaseURL,
+			Group:      target.LocalGroup,
+			Models:     joinNormalizedModels(target.Models),
+			Status:     common.ChannelStatusEnabled,
+			SupplierID: id,
 		}
+		stampSupplierChannelOtherInfo(channel, target)
 		if err := channel.Insert(); err != nil {
-			warnings = append(warnings, fmt.Sprintf("创建渠道 %s 失败: %v", group.LocalGroup, err))
+			warnings = append(warnings, fmt.Sprintf("创建渠道 %s 失败: %v", target.Name, err))
 			continue
 		}
 		created++
+		existingBySyncKey[syncKey] = struct{}{}
 	}
 
-	// 重置代理缓存
 	service.ResetProxyClientCache()
 
 	message := fmt.Sprintf("批量创建完成: 成功%d个, 跳过%d个", created, skipped)
@@ -2185,15 +3247,179 @@ func BatchMapLocalGroup(c *gin.Context) {
 
 	message := fmt.Sprintf("批量映射完成: 成功%d个", updated)
 	groups, _ := model.GetSupplierGroups(id)
+	supplier, _ := model.GetSupplierById(id)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":  updated > 0,
 		"message":  message,
 		"updated":  updated,
 		"warnings": warnings,
-		"groups":   groups,
+		"groups":   buildSupplierGroupResponse(supplier, groups),
 	})
 }
+func GetSupplierProviderRules(c *gin.Context) {
+	rules := getSupplierProviderRules()
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    rules,
+	})
+}
+
+func TestSupplierProviderRules(c *gin.Context) {
+	var req struct {
+		Rules         []supplierProviderRule `json:"rules"`
+		UpstreamGroup string                 `json:"upstream_group"`
+		Models        []string               `json:"models"`
+		LocalGroup    string                 `json:"local_group"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "参数错误"})
+		return
+	}
+	rules := cloneSupplierProviderRules(req.Rules)
+	if len(rules) == 0 {
+		rules = getSupplierProviderRules()
+	}
+	resolver := loadSupplierModelResolverWithRules(rules)
+	models := normalizeModelNames(req.Models)
+	category := detectSupplierCategoryWithRules(rules, req.LocalGroup, req.UpstreamGroup, strings.Join(models, ","))
+	if category == "" {
+		for _, modelName := range models {
+			if category = resolver.DetectCategory(modelName); category != "" {
+				break
+			}
+		}
+	}
+	rule, _ := getSupplierProviderRuleByCategory(category, rules)
+	channelType := inferChannelTypeByModels(models, resolver, 1)
+	if channelType == 1 && rule.ChannelType != 0 {
+		channelType = rule.ChannelType
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"category":          category,
+			"vendor_name":       rule.VendorName,
+			"channel_type":      channelType,
+			"channel_type_name": constant.GetChannelTypeName(channelType),
+			"patterns":          rule.Patterns,
+			"models":            models,
+			"upstream_group":    strings.TrimSpace(req.UpstreamGroup),
+			"local_group":       strings.TrimSpace(req.LocalGroup),
+		},
+	})
+}
+
+func UpdateSupplierProviderRules(c *gin.Context) {
+	var req struct {
+		Rules []supplierProviderRule `json:"rules"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "参数错误"})
+		return
+	}
+	rules := cloneSupplierProviderRules(req.Rules)
+	if len(rules) == 0 {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "规则不能为空"})
+		return
+	}
+	payload, err := common.Marshal(rules)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": fmt.Sprintf("序列化规则失败: %v", err)})
+		return
+	}
+	if err := model.UpdateOption(supplierProviderRulesOptionKey, string(payload)); err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": fmt.Sprintf("保存规则失败: %v", err)})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "规则已保存", "data": rules})
+}
+
+func RepairSuppliersByProviderRules(c *gin.Context) {
+	suppliers, err := model.GetAllSuppliers()
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取供应商列表失败"})
+		return
+	}
+	if len(suppliers) == 0 {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "没有供应商数据"})
+		return
+	}
+
+	resolver := loadSupplierModelResolver()
+	localGroups := getLocalGroups()
+	localGroupSet := make(map[string]struct{}, len(localGroups))
+	for _, localGroup := range localGroups {
+		localGroupSet[localGroup.Name] = struct{}{}
+	}
+
+	totalDetails := map[string]int{
+		"suppliers_total":     len(suppliers),
+		"suppliers_processed": 0,
+		"models_created":      0,
+		"models_updated":      0,
+		"channels_created":    0,
+		"channels_updated":    0,
+		"channels_deleted":    0,
+		"channel_targets":     0,
+	}
+	allWarnings := make([]string, 0)
+
+	for _, supplier := range suppliers {
+		groups, err := model.GetSupplierGroups(supplier.Id)
+		if err != nil {
+			allWarnings = append(allWarnings, fmt.Sprintf("[%s] 读取分组失败: %v", supplier.Name, err))
+			continue
+		}
+		if len(groups) == 0 {
+			continue
+		}
+		totalDetails["suppliers_processed"]++
+
+		targets, _, targetWarnings := buildSupplierChannelTargets(supplier, groups, &localGroups, localGroupSet, resolver)
+		for _, warning := range targetWarnings {
+			allWarnings = append(allWarnings, fmt.Sprintf("[%s] %s", supplier.Name, warning))
+		}
+		for _, warning := range persistSupplierGroupLocalMappings(groups) {
+			allWarnings = append(allWarnings, fmt.Sprintf("[%s] %s", supplier.Name, warning))
+		}
+
+		modelsCreated, modelsUpdated, modelWarnings := syncSupplierModelsToMeta(targets, resolver)
+		totalDetails["models_created"] += modelsCreated
+		totalDetails["models_updated"] += modelsUpdated
+		for _, warning := range modelWarnings {
+			allWarnings = append(allWarnings, fmt.Sprintf("[%s] %s", supplier.Name, warning))
+		}
+
+		channelsCreated, channelsUpdated, channelsDeleted, channelWarnings := reconcileSupplierChannels(supplier, targets)
+		totalDetails["channels_created"] += channelsCreated
+		totalDetails["channels_updated"] += channelsUpdated
+		totalDetails["channels_deleted"] += channelsDeleted
+		totalDetails["channel_targets"] += len(targets)
+		for _, warning := range channelWarnings {
+			allWarnings = append(allWarnings, fmt.Sprintf("[%s] %s", supplier.Name, warning))
+		}
+	}
+
+	service.ResetProxyClientCache()
+	message := fmt.Sprintf("规则重跑完成: 处理%d个供应商, 模型+%d/~%d, 定价同步%d个, 渠道+%d/~%d/-%d",
+		totalDetails["suppliers_processed"],
+		totalDetails["models_created"],
+		totalDetails["models_updated"],
+		totalDetails["model_pricing_synced"],
+		totalDetails["channels_created"],
+		totalDetails["channels_updated"],
+		totalDetails["channels_deleted"],
+	)
+	c.JSON(http.StatusOK, gin.H{
+		"success":         true,
+		"partial_success": len(allWarnings) > 0,
+		"message":         message,
+		"details":         totalDetails,
+		"warnings":        allWarnings,
+	})
+}
+
 func SyncAllSuppliersFull(c *gin.Context) {
 	suppliers, err := model.GetAllSuppliers()
 	if err != nil {
@@ -2221,6 +3447,7 @@ func SyncAllSuppliersFull(c *gin.Context) {
 		"channels_created":                   0,
 		"channels_updated":                   0,
 		"channels_deleted":                   0,
+		"channel_targets":                    0,
 	}
 	allRatios := make(map[string]float64)
 	localGroups := getLocalGroups()
@@ -2228,6 +3455,7 @@ func SyncAllSuppliersFull(c *gin.Context) {
 	for _, localGroup := range localGroups {
 		localGroupSet[localGroup.Name] = struct{}{}
 	}
+	resolver := loadSupplierModelResolver()
 
 	for _, supplier := range suppliers {
 		if supplier.Status != common.ChannelStatusEnabled {
@@ -2236,7 +3464,7 @@ func SyncAllSuppliersFull(c *gin.Context) {
 		totalDetails["suppliers_processed"]++
 		client := &http.Client{Timeout: upstreamRequestTimeout}
 
-		groups, totalGroups, added, updated, removed, syncErr := syncSupplierGroupsFromUpstream(client, supplier)
+		groups, upstreamPricingInfo, totalGroups, added, updated, removed, syncErr := syncSupplierGroupsFromUpstream(client, supplier)
 		if syncErr != nil {
 			allWarnings = append(allWarnings, fmt.Sprintf("[%s] 采集失败: %v", supplier.Name, syncErr))
 			continue
@@ -2261,141 +3489,43 @@ func SyncAllSuppliersFull(c *gin.Context) {
 			groups, _ = model.GetSupplierGroups(supplier.Id)
 		}
 
-		for _, group := range groups {
-			if group == nil {
+		channelTargets, _, targetWarnings := buildSupplierChannelTargets(supplier, groups, &localGroups, localGroupSet, resolver)
+		for _, warning := range targetWarnings {
+			allWarnings = append(allWarnings, fmt.Sprintf("[%s] %s", supplier.Name, warning))
+		}
+		for _, warning := range persistSupplierGroupLocalMappings(groups) {
+			allWarnings = append(allWarnings, fmt.Sprintf("[%s] %s", supplier.Name, warning))
+		}
+		groups, _ = model.GetSupplierGroups(supplier.Id)
+		modelsCreated, modelsUpdated, modelWarnings := syncSupplierModelsToMeta(channelTargets, resolver)
+		totalDetails["models_created"] += modelsCreated
+		totalDetails["models_updated"] += modelsUpdated
+		for _, warning := range modelWarnings {
+			allWarnings = append(allWarnings, fmt.Sprintf("[%s] %s", supplier.Name, warning))
+		}
+		pricingSynced, pricingWarnings := syncSupplierModelPricing(upstreamPricingInfo, channelTargets)
+		totalDetails["model_pricing_synced"] += pricingSynced
+		for _, warning := range pricingWarnings {
+			allWarnings = append(allWarnings, fmt.Sprintf("[%s] %s", supplier.Name, warning))
+		}
+		totalDetails["channel_targets"] += len(channelTargets)
+
+		for _, target := range channelTargets {
+			if strings.TrimSpace(target.LocalGroup) == "" {
 				continue
 			}
-			localGroup := strings.TrimSpace(group.LocalGroup)
-			if localGroup == "" {
-				continue
-			}
-			if _, exists := localGroupSet[localGroup]; !exists {
-				totalDetails["ratios_skipped_invalid_local_group"]++
-				allWarnings = append(allWarnings, fmt.Sprintf("[%s] 本地分组 %s 不存在于系统分组配置，跳过倍率同步（上游分组: %s）", supplier.Name, localGroup, group.UpstreamGroup))
-				continue
-			}
-			finalRatio := roundRatio(group.GroupRatio * supplier.Markup)
-			if existingRatio, exists := allRatios[localGroup]; !exists || finalRatio > existingRatio {
-				allRatios[localGroup] = finalRatio
+			finalRatio := roundRatio(target.GroupRatio * supplier.Markup)
+			if existingRatio, exists := allRatios[target.LocalGroup]; !exists || finalRatio > existingRatio {
+				allRatios[target.LocalGroup] = finalRatio
 			}
 		}
 
-		existingChannels, _ := model.GetChannelsBySupplierID(supplier.Id)
-		existingByGroup := make(map[string][]*model.Channel)
-		for _, channel := range existingChannels {
-			if channel == nil {
-				continue
-			}
-			groupName := strings.TrimSpace(channel.Group)
-			existingByGroup[groupName] = append(existingByGroup[groupName], channel)
-		}
-
-		targetGroups := make(map[string]*model.SupplierGroup)
-		activeMappedGroups := make(map[string]struct{})
-		for _, group := range groups {
-			if group == nil {
-				continue
-			}
-			localGroup := strings.TrimSpace(group.LocalGroup)
-			if localGroup == "" {
-				continue
-			}
-			if _, exists := localGroupSet[localGroup]; !exists {
-				continue
-			}
-			activeMappedGroups[localGroup] = struct{}{}
-			if strings.TrimSpace(group.ApiKey) == "" {
-				allWarnings = append(allWarnings, fmt.Sprintf("[%s] 本地分组 %s 未获取到可用密钥，跳过本次渠道更新（上游分组: %s）", supplier.Name, localGroup, group.UpstreamGroup))
-				continue
-			}
-			if existingGroup, exists := targetGroups[localGroup]; exists {
-				if group.GroupRatio > existingGroup.GroupRatio {
-					targetGroups[localGroup] = group
-				}
-				allWarnings = append(allWarnings, fmt.Sprintf("[%s] 本地分组 %s 存在多个上游分组映射，按最高倍率保留（候选: %s）", supplier.Name, localGroup, group.UpstreamGroup))
-				continue
-			}
-			targetGroups[localGroup] = group
-		}
-
-		for localGroup, group := range targetGroups {
-			endpointType := getSupplierGroupPreferredEndpointType(group)
-			channelType := getChannelTypeByEndpointType(endpointType)
-			models := strings.TrimSpace(group.SupportedModels)
-
-			existingList := existingByGroup[localGroup]
-			if len(existingList) == 0 {
-				channel := &model.Channel{
-					Type:        channelType,
-					Key:         group.ApiKey,
-					Name:        fmt.Sprintf("%s-%s", supplier.Name, localGroup),
-					BaseURL:     &supplier.BaseURL,
-					Group:       localGroup,
-					Models:      models,
-					Status:      common.ChannelStatusEnabled,
-					CreatedTime: common.GetTimestamp(),
-					SupplierID:  supplier.Id,
-				}
-				if err := channel.Insert(); err != nil {
-					allWarnings = append(allWarnings, fmt.Sprintf("[%s] 创建渠道 %s 失败: %v", supplier.Name, localGroup, err))
-					continue
-				}
-				totalDetails["channels_created"]++
-				continue
-			}
-
-			mainChannel := existingList[0]
-			changed := false
-			if mainChannel.Key != group.ApiKey {
-				mainChannel.Key = group.ApiKey
-				changed = true
-			}
-			if mainChannel.Models != models {
-				mainChannel.Models = models
-				changed = true
-			}
-			if mainChannel.Type != channelType {
-				mainChannel.Type = channelType
-				changed = true
-			}
-			if mainChannel.BaseURL == nil || strings.TrimSpace(*mainChannel.BaseURL) != supplier.BaseURL {
-				mainChannel.BaseURL = &supplier.BaseURL
-				changed = true
-			}
-			if mainChannel.Status != common.ChannelStatusEnabled {
-				mainChannel.Status = common.ChannelStatusEnabled
-				changed = true
-			}
-			if changed {
-				if err := mainChannel.Update(); err != nil {
-					allWarnings = append(allWarnings, fmt.Sprintf("[%s] 更新渠道 %s 失败: %v", supplier.Name, localGroup, err))
-				} else {
-					totalDetails["channels_updated"]++
-				}
-			}
-
-			if len(existingList) > 1 {
-				for _, extraChannel := range existingList[1:] {
-					if err := extraChannel.Delete(); err != nil {
-						allWarnings = append(allWarnings, fmt.Sprintf("[%s] 删除重复渠道 %d(%s) 失败: %v", supplier.Name, extraChannel.Id, localGroup, err))
-						continue
-					}
-					totalDetails["channels_deleted"]++
-				}
-			}
-		}
-
-		for localGroup, channelList := range existingByGroup {
-			if _, exists := activeMappedGroups[localGroup]; exists {
-				continue
-			}
-			for _, channel := range channelList {
-				if err := channel.Delete(); err != nil {
-					allWarnings = append(allWarnings, fmt.Sprintf("[%s] 删除渠道 %d(%s) 失败: %v", supplier.Name, channel.Id, localGroup, err))
-					continue
-				}
-				totalDetails["channels_deleted"]++
-			}
+		created, updated, deleted, channelWarnings := reconcileSupplierChannels(supplier, channelTargets)
+		totalDetails["channels_created"] += created
+		totalDetails["channels_updated"] += updated
+		totalDetails["channels_deleted"] += deleted
+		for _, warning := range channelWarnings {
+			allWarnings = append(allWarnings, fmt.Sprintf("[%s] %s", supplier.Name, warning))
 		}
 	}
 
@@ -2413,11 +3543,14 @@ func SyncAllSuppliersFull(c *gin.Context) {
 
 	service.ResetProxyClientCache()
 
-	message := fmt.Sprintf("同步完成: %d个供应商, 分组+%d/~%d/-%d, 渠道+%d/~%d/-%d, 倍率%d个",
+	message := fmt.Sprintf("同步完成: %d个供应商, 分组+%d/~%d/-%d, 模型+%d/~%d, 定价同步%d个, 渠道+%d/~%d/-%d, 倍率%d个",
 		totalDetails["suppliers_processed"],
 		totalDetails["groups_added"],
 		totalDetails["groups_updated"],
 		totalDetails["groups_removed"],
+		totalDetails["models_created"],
+		totalDetails["models_updated"],
+		totalDetails["model_pricing_synced"],
 		totalDetails["channels_created"],
 		totalDetails["channels_updated"],
 		totalDetails["channels_deleted"],

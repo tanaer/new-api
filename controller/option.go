@@ -15,6 +15,23 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func getOptionDisplayValue(key string, value interface{}) string {
+	switch key {
+	case "ModelRatio":
+		return ratio_setting.ModelRatio2JSONString()
+	case "CompletionRatio":
+		return ratio_setting.CompletionRatio2JSONString()
+	case "ModelPrice":
+		return ratio_setting.ModelPrice2JSONString()
+	case "CacheRatio":
+		return ratio_setting.CacheRatio2JSONString()
+	case "CreateCacheRatio":
+		return ratio_setting.CreateCacheRatio2JSONString()
+	default:
+		return common.Interface2String(value)
+	}
+}
+
 func GetOptions(c *gin.Context) {
 	var options []*model.Option
 	common.OptionMapRWMutex.Lock()
@@ -28,7 +45,7 @@ func GetOptions(c *gin.Context) {
 		}
 		options = append(options, &model.Option{
 			Key:   k,
-			Value: common.Interface2String(v),
+			Value: getOptionDisplayValue(k, v),
 		})
 	}
 	common.OptionMapRWMutex.Unlock()
