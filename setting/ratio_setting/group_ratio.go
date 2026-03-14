@@ -3,6 +3,8 @@ package ratio_setting
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/config"
@@ -32,10 +34,21 @@ var defaultGroupSpecialUsableGroup = map[string]map[string]string{
 	},
 }
 
+type GroupRoutePolicy struct {
+	Mode           string  `json:"mode"`
+	MinSuccessRate float64 `json:"min_success_rate"`
+}
+
+const (
+	GroupRouteModeProfitFirst     = "profit_first"
+	GroupRouteModeExperienceFirst = "experience_first"
+)
+
 type GroupRatioSetting struct {
 	GroupRatio              *types.RWMap[string, float64]            `json:"group_ratio"`
 	GroupGroupRatio         *types.RWMap[string, map[string]float64] `json:"group_group_ratio"`
 	GroupSpecialUsableGroup *types.RWMap[string, map[string]string]  `json:"group_special_usable_group"`
+	GroupRoutePolicy        *types.RWMap[string, GroupRoutePolicy]   `json:"group_route_policy"`
 }
 
 var groupRatioSetting GroupRatioSetting
@@ -43,12 +56,14 @@ var groupRatioSetting GroupRatioSetting
 func init() {
 	groupSpecialUsableGroup := types.NewRWMap[string, map[string]string]()
 	groupSpecialUsableGroup.AddAll(defaultGroupSpecialUsableGroup)
+	groupRoutePolicy := types.NewRWMap[string, GroupRoutePolicy]()
 
 	groupRatioMap.AddAll(defaultGroupRatio)
 	groupGroupRatioMap.AddAll(defaultGroupGroupRatio)
 
 	groupRatioSetting = GroupRatioSetting{
 		GroupSpecialUsableGroup: groupSpecialUsableGroup,
+		GroupRoutePolicy:        groupRoutePolicy,
 		GroupRatio:              groupRatioMap,
 		GroupGroupRatio:         groupGroupRatioMap,
 	}
@@ -60,6 +75,9 @@ func GetGroupRatioSetting() *GroupRatioSetting {
 	if groupRatioSetting.GroupSpecialUsableGroup == nil {
 		groupRatioSetting.GroupSpecialUsableGroup = types.NewRWMap[string, map[string]string]()
 		groupRatioSetting.GroupSpecialUsableGroup.AddAll(defaultGroupSpecialUsableGroup)
+	}
+	if groupRatioSetting.GroupRoutePolicy == nil {
+		groupRatioSetting.GroupRoutePolicy = types.NewRWMap[string, GroupRoutePolicy]()
 	}
 	return &groupRatioSetting
 }
@@ -100,6 +118,52 @@ func GetGroupGroupRatio(userGroup, usingGroup string) (float64, bool) {
 		return -1, false
 	}
 	return ratio, true
+}
+
+func normalizeGroupRoutePolicy(policy GroupRoutePolicy) (GroupRoutePolicy, bool) {
+	policy.Mode = strings.TrimSpace(policy.Mode)
+	switch policy.Mode {
+	case GroupRouteModeProfitFirst, GroupRouteModeExperienceFirst:
+	default:
+		return GroupRoutePolicy{}, false
+	}
+	if policy.MinSuccessRate < 0 || policy.MinSuccessRate > 100 {
+		return GroupRoutePolicy{}, false
+	}
+	return policy, true
+}
+
+func GetUserGroupRoutePolicy(userGroup string) (GroupRoutePolicy, bool) {
+	setting := GetGroupRatioSetting()
+	if setting.GroupRoutePolicy == nil {
+		return GroupRoutePolicy{}, false
+	}
+	if userGroup != "" {
+		if policy, ok := setting.GroupRoutePolicy.Get(userGroup); ok {
+			return normalizeGroupRoutePolicy(policy)
+		}
+	}
+	if policy, ok := setting.GroupRoutePolicy.Get("default"); ok {
+		return normalizeGroupRoutePolicy(policy)
+	}
+	return GroupRoutePolicy{}, false
+}
+
+func ValidateGroupRoutePolicyJSON(jsonStr string) error {
+	policies := make(map[string]GroupRoutePolicy)
+	if err := common.UnmarshalJsonStr(jsonStr, &policies); err != nil {
+		return err
+	}
+	for userGroup, policy := range policies {
+		if _, ok := normalizeGroupRoutePolicy(policy); !ok {
+			return fmt.Errorf("用户分组 %s 的路由策略无效，mode 仅支持 %s/%s，min_success_rate 需在 0-100 之间",
+				userGroup,
+				GroupRouteModeProfitFirst,
+				GroupRouteModeExperienceFirst,
+			)
+		}
+	}
+	return nil
 }
 
 func GroupGroupRatio2JSONString() string {

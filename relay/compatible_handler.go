@@ -307,8 +307,7 @@ func postConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage 
 	claudeWebSearchCallCount := ctx.GetInt("claude_web_search_requests")
 	if claudeWebSearchCallCount > 0 {
 		claudeWebSearchPrice = operation_setting.GetClaudeWebSearchPricePerThousand()
-		dClaudeWebSearchQuota = decimal.NewFromFloat(claudeWebSearchPrice).
-			Div(decimal.NewFromInt(1000)).Mul(dGroupRatio).Mul(dQuotaPerUnit).Mul(decimal.NewFromInt(int64(claudeWebSearchCallCount)))
+		dClaudeWebSearchQuota, claudeWebSearchCallCount = service.CalculateClaudeWebSearchQuota(ctx, groupRatio)
 		extraContent = append(extraContent, fmt.Sprintf("Claude Web Search 调用 %d 次，调用花费 %s",
 			claudeWebSearchCallCount, dClaudeWebSearchQuota.String()))
 	}
@@ -391,6 +390,7 @@ func postConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage 
 	}
 	// 添加 responses tools call 调用的配额
 	quotaCalculateDecimal = quotaCalculateDecimal.Add(dWebSearchQuota)
+	quotaCalculateDecimal = quotaCalculateDecimal.Add(dClaudeWebSearchQuota)
 	quotaCalculateDecimal = quotaCalculateDecimal.Add(dFileSearchQuota)
 	// 添加 audio input 独立计费
 	quotaCalculateDecimal = quotaCalculateDecimal.Add(audioInputQuota)

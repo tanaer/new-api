@@ -1183,6 +1183,78 @@ func buildSupplierGroupResponse(supplier *model.Supplier, groups []*model.Suppli
 	return items
 }
 
+func buildSupplierCandidateRatios(targets map[string]supplierChannelTarget, supplierMarkup float64) map[string]float64 {
+	candidateRatios := make(map[string]float64)
+	for _, target := range targets {
+		if strings.TrimSpace(target.LocalGroup) == "" {
+			continue
+		}
+		finalRatio := roundRatio(target.GroupRatio * supplierMarkup)
+		if existingRatio, exists := candidateRatios[target.LocalGroup]; !exists || finalRatio > existingRatio {
+			candidateRatios[target.LocalGroup] = finalRatio
+		}
+	}
+	return candidateRatios
+}
+
+func collectUnderpricedLocalGroupWarnings(candidateRatios map[string]float64, currentRatios map[string]float64) []string {
+	if len(candidateRatios) == 0 {
+		return nil
+	}
+	groupNames := make([]string, 0, len(candidateRatios))
+	for groupName := range candidateRatios {
+		groupNames = append(groupNames, groupName)
+	}
+	sort.Strings(groupNames)
+
+	warnings := make([]string, 0)
+	for _, groupName := range groupNames {
+		requiredRatio := roundRatio(candidateRatios[groupName])
+		currentRatio := roundRatio(currentRatios[groupName])
+		if currentRatio+0.0001 >= requiredRatio {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf("本地分组 %s 当前系统倍率 %.3f 低于按现有上游成本推导的建议倍率 %.3f，继续使用可能亏本，请执行完整同步或手动调高倍率", groupName, currentRatio, requiredRatio))
+	}
+	return warnings
+}
+
+func mergeProjectedGroupRatios(base map[string]float64, candidateRatios map[string]float64) map[string]float64 {
+	projected := make(map[string]float64, len(base)+len(candidateRatios))
+	for groupName, ratio := range base {
+		projected[groupName] = roundRatio(ratio)
+	}
+	for groupName, ratio := range candidateRatios {
+		ratio = roundRatio(ratio)
+		if currentRatio, exists := projected[groupName]; !exists || ratio > currentRatio {
+			projected[groupName] = ratio
+		}
+	}
+	return projected
+}
+
+func inspectSupplierRatioRisks(supplier *model.Supplier, groups []*model.SupplierGroup) []string {
+	if supplier == nil || len(groups) == 0 {
+		return nil
+	}
+	localGroups := getLocalGroups()
+	localGroupSet := make(map[string]struct{}, len(localGroups))
+	for _, localGroup := range localGroups {
+		localGroupSet[localGroup.Name] = struct{}{}
+	}
+
+	resolver := loadSupplierModelResolver()
+	clonedGroups := cloneSupplierGroups(groups)
+	targets, _, targetWarnings := buildSupplierChannelTargets(supplier, clonedGroups, &localGroups, localGroupSet, resolver)
+	candidateRatios := buildSupplierCandidateRatios(targets, supplier.Markup)
+	ratioWarnings := collectUnderpricedLocalGroupWarnings(candidateRatios, ratio_setting.GetGroupRatioCopy())
+
+	if len(targetWarnings) == 0 {
+		return ratioWarnings
+	}
+	return append(targetWarnings, ratioWarnings...)
+}
+
 func persistSupplierGroupLocalMappings(groups []*model.SupplierGroup) []string {
 	warnings := make([]string, 0)
 	for _, group := range groups {
@@ -1196,8 +1268,51 @@ func persistSupplierGroupLocalMappings(groups []*model.SupplierGroup) []string {
 	return warnings
 }
 
-func reconcileSupplierChannels(supplier *model.Supplier, targets map[string]supplierChannelTarget) (int, int, int, []string) {
+func clearSupplierChannelProfitGuard(channel *model.Channel) bool {
+	if channel == nil {
+		return false
+	}
+	otherInfo := channel.GetOtherInfo()
+	originalCount := len(otherInfo)
+	delete(otherInfo, "profit_guard")
+	delete(otherInfo, "profit_guard_current_ratio")
+	delete(otherInfo, "profit_guard_required_ratio")
+	delete(otherInfo, "profit_guard_updated_at")
+	delete(otherInfo, "profit_guard_reason")
+	if len(otherInfo) == originalCount {
+		return false
+	}
+	channel.SetOtherInfo(otherInfo)
+	return true
+}
+
+func protectSupplierChannelFromLoss(channel *model.Channel, target supplierChannelTarget, currentRatio float64, requiredRatio float64) (bool, error) {
+	if channel == nil {
+		return false, nil
+	}
+	originalStatus := channel.Status
+	originalOtherInfo := channel.OtherInfo
+	otherInfo := channel.GetOtherInfo()
+	otherInfo["profit_guard"] = true
+	otherInfo["profit_guard_current_ratio"] = currentRatio
+	otherInfo["profit_guard_required_ratio"] = requiredRatio
+	otherInfo["profit_guard_updated_at"] = common.GetTimestamp()
+	otherInfo["profit_guard_reason"] = fmt.Sprintf("本地分组 %s 当前系统倍率 %.3f 低于该上游所需倍率 %.3f，已自动保护避免亏损", target.LocalGroup, currentRatio, requiredRatio)
+	channel.SetOtherInfo(otherInfo)
+	if channel.Status != common.ChannelStatusManuallyDisabled {
+		channel.Status = common.ChannelStatusAutoDisabled
+	}
+	if channel.Status == originalStatus && channel.OtherInfo == originalOtherInfo {
+		return false, nil
+	}
+	return true, channel.Update()
+}
+
+func reconcileSupplierChannels(supplier *model.Supplier, targets map[string]supplierChannelTarget, currentGroupRatios map[string]float64) (int, int, int, []string) {
 	warnings := make([]string, 0)
+	if currentGroupRatios == nil {
+		currentGroupRatios = ratio_setting.GetGroupRatioCopy()
+	}
 	existingChannels, _ := model.GetChannelsBySupplierID(supplier.Id)
 	allRefs := make([]*supplierExistingChannelRef, 0, len(existingChannels))
 	existingBySyncKey := make(map[string][]*supplierExistingChannelRef)
@@ -1228,16 +1343,6 @@ func reconcileSupplierChannels(supplier *model.Supplier, targets map[string]supp
 
 	for _, syncKey := range targetKeys {
 		target := targets[syncKey]
-		if strings.TrimSpace(target.ApiKey) == "" {
-			warnings = append(warnings, fmt.Sprintf("本地分组 %s 未获取到可用密钥，跳过本次渠道更新（上游分组: %s）", target.LocalGroup, target.UpstreamGroup))
-			continue
-		}
-
-		models := joinNormalizedModels(target.Models)
-		if models == "" {
-			warnings = append(warnings, fmt.Sprintf("本地分组 %s 未识别到可用模型，跳过渠道更新并清理旧渠道（上游分组: %s）", target.LocalGroup, target.UpstreamGroup))
-			continue
-		}
 		refs := existingBySyncKey[syncKey]
 		var mainRef *supplierExistingChannelRef
 		if len(refs) > 0 {
@@ -1255,6 +1360,42 @@ func reconcileSupplierChannels(supplier *model.Supplier, targets map[string]supp
 				mainRef = ref
 				break
 			}
+		}
+		if profitable, currentRatio, requiredRatio := isSupplierTargetProfitable(target, supplier, currentGroupRatios); !profitable {
+			warnings = append(warnings, fmt.Sprintf("本地分组 %s 当前系统倍率 %.3f 低于该上游所需倍率 %.3f，渠道 %s 已跳过创建/启用以避免亏损", target.LocalGroup, currentRatio, requiredRatio, target.Name))
+			if mainRef != nil && mainRef.Channel != nil {
+				mainRef.Matched = true
+				changed, err := protectSupplierChannelFromLoss(mainRef.Channel, target, currentRatio, requiredRatio)
+				if err != nil {
+					warnings = append(warnings, fmt.Sprintf("保护渠道 %s 失败: %v", target.Name, err))
+				} else if changed {
+					channelsUpdated++
+				}
+			}
+			if len(refs) > 1 {
+				for _, extraRef := range refs[1:] {
+					if extraRef == nil || extraRef.Channel == nil || extraRef.Matched {
+						continue
+					}
+					extraRef.Matched = true
+					if err := extraRef.Channel.Delete(); err != nil {
+						warnings = append(warnings, fmt.Sprintf("删除重复渠道 %d(%s) 失败: %v", extraRef.Channel.Id, target.Name, err))
+						continue
+					}
+					channelsDeleted++
+				}
+			}
+			continue
+		}
+		if strings.TrimSpace(target.ApiKey) == "" {
+			warnings = append(warnings, fmt.Sprintf("本地分组 %s 未获取到可用密钥，跳过本次渠道更新（上游分组: %s）", target.LocalGroup, target.UpstreamGroup))
+			continue
+		}
+
+		models := joinNormalizedModels(target.Models)
+		if models == "" {
+			warnings = append(warnings, fmt.Sprintf("本地分组 %s 未识别到可用模型，跳过渠道更新并清理旧渠道（上游分组: %s）", target.LocalGroup, target.UpstreamGroup))
+			continue
 		}
 
 		if mainRef == nil {
@@ -1280,6 +1421,9 @@ func reconcileSupplierChannels(supplier *model.Supplier, targets map[string]supp
 		mainRef.Matched = true
 		mainChannel := mainRef.Channel
 		changed := false
+		if clearSupplierChannelProfitGuard(mainChannel) {
+			changed = true
+		}
 		originalOtherInfo := mainChannel.OtherInfo
 		stampSupplierChannelOtherInfo(mainChannel, target)
 		if originalOtherInfo != mainChannel.OtherInfo {
@@ -1738,6 +1882,27 @@ func protectSyncedGroupRatios(candidateRatios map[string]float64) (map[string]fl
 	}
 
 	return protectedRatios, warnings, heldCount
+}
+
+func getRequiredSupplierLocalRatio(target supplierChannelTarget, supplier *model.Supplier) float64 {
+	if supplier == nil {
+		return 0
+	}
+	return roundRatio(target.GroupRatio * supplier.Markup)
+}
+
+func isSupplierTargetProfitable(target supplierChannelTarget, supplier *model.Supplier, currentGroupRatios map[string]float64) (bool, float64, float64) {
+	localGroup := strings.TrimSpace(target.LocalGroup)
+	if localGroup == "" || supplier == nil {
+		return true, 0, 0
+	}
+	currentRatio, exists := currentGroupRatios[localGroup]
+	if !exists {
+		return true, 0, 0
+	}
+	currentRatio = roundRatio(currentRatio)
+	requiredRatio := getRequiredSupplierLocalRatio(target, supplier)
+	return currentRatio >= requiredRatio, currentRatio, requiredRatio
 }
 
 // roundRatio 倍率保留3位小数
@@ -2554,12 +2719,19 @@ func FetchSupplierGroups(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
 		return
 	}
+	warnings := inspectSupplierRatioRisks(supplier, groups)
 
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": fmt.Sprintf("采集完成: %d个分组, 新增%d, 更新%d, 清理%d", totalGroups, added, updated, removed),
-		"data":    buildSupplierGroupResponse(supplier, groups),
-	})
+	resp := gin.H{
+		"success":         true,
+		"partial_success": len(warnings) > 0,
+		"message":         fmt.Sprintf("采集完成: %d个分组, 新增%d, 更新%d, 清理%d", totalGroups, added, updated, removed),
+		"data":            buildSupplierGroupResponse(supplier, groups),
+		"profit_warnings": warnings,
+	}
+	if len(warnings) > 0 {
+		resp["warnings"] = warnings
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 func FetchSupplierGroupsWithKeys(c *gin.Context) {
@@ -2594,6 +2766,9 @@ func FetchSupplierGroupsWithKeys(c *gin.Context) {
 
 	created, reused, failures := autoProvisionGroupTokens(client, supplier, groups, auth)
 	groups, _ = model.GetSupplierGroups(id)
+	riskWarnings := inspectSupplierRatioRisks(supplier, groups)
+	warnings := append([]string{}, failures...)
+	warnings = append(warnings, riskWarnings...)
 
 	message := fmt.Sprintf("采集完成: %d个分组, 新增%d, 更新%d, 清理%d, 新增密钥%d, 复用密钥%d", totalGroups, added, updated, removed, created, reused)
 	if len(failures) > 0 {
@@ -2602,15 +2777,17 @@ func FetchSupplierGroupsWithKeys(c *gin.Context) {
 
 	resp := gin.H{
 		"success":          len(failures) == 0,
+		"partial_success":  len(warnings) > 0,
 		"message":          message,
 		"data":             buildSupplierGroupResponse(supplier, groups),
 		"upstream_user_id": auth.userID,
 		"key_created":      created,
 		"key_reused":       reused,
 		"key_failed":       len(failures),
+		"profit_warnings":  riskWarnings,
 	}
-	if len(failures) > 0 {
-		resp["warnings"] = failures
+	if len(warnings) > 0 {
+		resp["warnings"] = warnings
 	}
 	c.JSON(http.StatusOK, resp)
 }
@@ -3025,7 +3202,7 @@ func SyncSupplierFull(c *gin.Context) {
 
 	// Step 5: 渠道增改删对齐（支持一个上游分组拆分多个本地渠道）
 	stepStartedAt = time.Now()
-	channelsCreated, channelsUpdated, channelsDeleted, channelWarnings := reconcileSupplierChannels(supplier, channelTargets)
+	channelsCreated, channelsUpdated, channelsDeleted, channelWarnings := reconcileSupplierChannels(supplier, channelTargets, updatedRatios)
 	warnings = append(warnings, channelWarnings...)
 	appendStep("reconcile_channels", true, stepStartedAt, fmt.Sprintf("新增%d, 更新%d, 删除%d", channelsCreated, channelsUpdated, channelsDeleted))
 
@@ -3144,6 +3321,11 @@ func BatchCreateChannels(c *gin.Context) {
 		target := targets[syncKey]
 		if strings.TrimSpace(target.LocalGroup) == "" {
 			warnings = append(warnings, fmt.Sprintf("分组 %s 未映射本地分组，跳过", target.UpstreamGroup))
+			skipped++
+			continue
+		}
+		if profitable, currentRatio, requiredRatio := isSupplierTargetProfitable(target, supplier, ratio_setting.GetGroupRatioCopy()); !profitable {
+			warnings = append(warnings, fmt.Sprintf("本地分组 %s 当前系统倍率 %.3f 低于该上游所需倍率 %.3f，渠道 %s 已跳过创建以避免亏损", target.LocalGroup, currentRatio, requiredRatio, target.Name))
 			skipped++
 			continue
 		}
@@ -3391,7 +3573,7 @@ func RepairSuppliersByProviderRules(c *gin.Context) {
 			allWarnings = append(allWarnings, fmt.Sprintf("[%s] %s", supplier.Name, warning))
 		}
 
-		channelsCreated, channelsUpdated, channelsDeleted, channelWarnings := reconcileSupplierChannels(supplier, targets)
+		channelsCreated, channelsUpdated, channelsDeleted, channelWarnings := reconcileSupplierChannels(supplier, targets, nil)
 		totalDetails["channels_created"] += channelsCreated
 		totalDetails["channels_updated"] += channelsUpdated
 		totalDetails["channels_deleted"] += channelsDeleted
@@ -3520,7 +3702,8 @@ func SyncAllSuppliersFull(c *gin.Context) {
 			}
 		}
 
-		created, updated, deleted, channelWarnings := reconcileSupplierChannels(supplier, channelTargets)
+		projectedGroupRatios := mergeProjectedGroupRatios(ratio_setting.GetGroupRatioCopy(), allRatios)
+		created, updated, deleted, channelWarnings := reconcileSupplierChannels(supplier, channelTargets, projectedGroupRatios)
 		totalDetails["channels_created"] += created
 		totalDetails["channels_updated"] += updated
 		totalDetails["channels_deleted"] += deleted

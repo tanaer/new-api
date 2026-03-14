@@ -2,10 +2,11 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/bytedance/gopkg/util/gopool"
 )
@@ -81,7 +83,7 @@ func runSupplierRatioSync() {
 		changes := syncSupplierRatios(supplier)
 		if len(changes) > 0 {
 			// 记录同步日志
-			detailsJSON, _ := json.Marshal(changes)
+			detailsJSON, _ := common.Marshal(changes)
 			syncLog := &model.SupplierGroupSyncLog{
 				SupplierID:   supplier.Id,
 				SupplierName: supplier.Name,
@@ -104,9 +106,90 @@ func runSupplierRatioSync() {
 			logger.LogInfo(ctx, fmt.Sprintf("supplier ratio sync: supplier=%s, changes=%d", supplier.Name, len(changes)))
 		}
 	}
+
+	if err := syncLocalGroupRatiosFromSupplierGroups(suppliers); err != nil {
+		logger.LogWarn(ctx, fmt.Sprintf("supplier ratio sync: failed to sync local group ratios: %v", err))
+	}
 }
 
 type ratioChange = map[string]interface{}
+
+func roundSupplierSyncRatio(ratio float64) float64 {
+	return math.Round(ratio*1000) / 1000
+}
+
+func collectRequiredLocalGroupRatios(suppliers []*model.Supplier, groupsBySupplier map[int][]*model.SupplierGroup) map[string]float64 {
+	requiredRatios := make(map[string]float64)
+	for _, supplier := range suppliers {
+		if supplier == nil {
+			continue
+		}
+		for _, group := range groupsBySupplier[supplier.Id] {
+			if group == nil || strings.TrimSpace(group.LocalGroup) == "" {
+				continue
+			}
+			requiredRatio := roundSupplierSyncRatio(group.GroupRatio * supplier.Markup)
+			if currentRatio, exists := requiredRatios[group.LocalGroup]; !exists || requiredRatio > currentRatio {
+				requiredRatios[group.LocalGroup] = requiredRatio
+			}
+		}
+	}
+	return requiredRatios
+}
+
+func protectSupplierLocalRatios(currentRatios map[string]float64, requiredRatios map[string]float64) map[string]float64 {
+	protectedRatios := make(map[string]float64, len(requiredRatios))
+	for groupName, requiredRatio := range requiredRatios {
+		requiredRatio = roundSupplierSyncRatio(requiredRatio)
+		if currentRatio, exists := currentRatios[groupName]; exists && roundSupplierSyncRatio(currentRatio) > requiredRatio {
+			protectedRatios[groupName] = roundSupplierSyncRatio(currentRatio)
+			continue
+		}
+		protectedRatios[groupName] = requiredRatio
+	}
+	return protectedRatios
+}
+
+func hasSupplierLocalRatioDiff(currentRatios map[string]float64, targetRatios map[string]float64) bool {
+	for groupName, targetRatio := range targetRatios {
+		if roundSupplierSyncRatio(currentRatios[groupName]) != roundSupplierSyncRatio(targetRatio) {
+			return true
+		}
+	}
+	return false
+}
+
+func syncLocalGroupRatiosFromSupplierGroups(suppliers []*model.Supplier) error {
+	if len(suppliers) == 0 {
+		return nil
+	}
+
+	groupsBySupplier := make(map[int][]*model.SupplierGroup, len(suppliers))
+	for _, supplier := range suppliers {
+		if supplier == nil {
+			continue
+		}
+		groups, err := model.GetSupplierGroups(supplier.Id)
+		if err != nil {
+			return fmt.Errorf("读取供应商 %s 分组失败: %w", supplier.Name, err)
+		}
+		groupsBySupplier[supplier.Id] = groups
+	}
+
+	requiredRatios := collectRequiredLocalGroupRatios(suppliers, groupsBySupplier)
+	if len(requiredRatios) == 0 {
+		return nil
+	}
+
+	currentRatios := ratio_setting.GetGroupRatioCopy()
+	protectedRatios := protectSupplierLocalRatios(currentRatios, requiredRatios)
+	if !hasSupplierLocalRatioDiff(currentRatios, protectedRatios) {
+		return nil
+	}
+
+	ratio_setting.BatchUpdateGroupRatios(protectedRatios)
+	return model.UpdateOption("GroupRatio", ratio_setting.GroupRatio2JSONString())
+}
 
 // syncSupplierRatios 同步单个供应商的倍率
 func syncSupplierRatios(supplier *model.Supplier) []ratioChange {
@@ -125,7 +208,7 @@ func syncSupplierRatios(supplier *model.Supplier) []ratioChange {
 	}
 
 	var pricingResp map[string]interface{}
-	if err := json.Unmarshal(body, &pricingResp); err != nil {
+	if err := common.Unmarshal(body, &pricingResp); err != nil {
 		return nil
 	}
 
@@ -187,7 +270,7 @@ func runSupplierGroupChangeDetection() {
 				"added":   added,
 				"removed": removed,
 			}
-			detailsJSON, _ := json.Marshal(details)
+			detailsJSON, _ := common.Marshal(details)
 
 			syncType := "group_changed"
 			if len(added) > 0 && len(removed) == 0 {
@@ -246,7 +329,7 @@ func detectGroupChanges(supplier *model.Supplier) (added []string, removed []str
 	}
 
 	var pricingResp map[string]interface{}
-	if err := json.Unmarshal(body, &pricingResp); err != nil {
+	if err := common.Unmarshal(body, &pricingResp); err != nil {
 		return nil, nil
 	}
 

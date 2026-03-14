@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/QuantumNous/new-api/types"
@@ -288,11 +289,16 @@ func PostClaudeConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, 
 		calculateQuota = modelPrice * common.QuotaPerUnit * groupRatio
 	}
 
+	claudeWebSearchQuota, claudeWebSearchCalls := CalculateClaudeWebSearchQuota(ctx, groupRatio)
+	if !claudeWebSearchQuota.IsZero() {
+		calculateQuota += claudeWebSearchQuota.InexactFloat64()
+	}
+
 	if modelRatio != 0 && calculateQuota <= 0 {
 		calculateQuota = 1
 	}
 
-	quota := int(calculateQuota)
+	quota := int(math.Round(calculateQuota))
 
 	totalTokens := promptTokens + completionTokens
 
@@ -310,6 +316,10 @@ func PostClaudeConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, 
 		model.UpdateChannelUsedQuota(relayInfo.ChannelId, quota)
 	}
 
+	if claudeWebSearchCalls > 0 {
+		logContent += fmt.Sprintf("Claude Web Search 调用 %d 次，调用花费 %s", claudeWebSearchCalls, claudeWebSearchQuota.String())
+	}
+
 	if err := SettleBilling(ctx, relayInfo, quota); err != nil {
 		logger.LogError(ctx, "error settling billing: "+err.Error())
 	}
@@ -320,6 +330,11 @@ func PostClaudeConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, 
 		cacheCreationTokens5m, cacheCreationRatio5m,
 		cacheCreationTokens1h, cacheCreationRatio1h,
 		modelPrice, relayInfo.PriceData.GroupRatioInfo.GroupSpecialRatio)
+	if claudeWebSearchCalls > 0 {
+		other["web_search"] = true
+		other["web_search_call_count"] = claudeWebSearchCalls
+		other["web_search_price"] = operation_setting.GetClaudeWebSearchPricePerThousand()
+	}
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,
 		PromptTokens:     promptTokens,

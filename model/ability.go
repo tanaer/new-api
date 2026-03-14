@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/samber/lo"
 	"gorm.io/gorm"
@@ -121,9 +122,19 @@ func getChannelQuery(group string, model string, retry int) (*gorm.DB, error) {
 }
 
 func GetChannel(group string, model string, retry int) (*Channel, error) {
+	channels, err := getSatisfiedChannelsFromDB(group, model, retry)
+	if err != nil {
+		return nil, err
+	}
+	if len(channels) == 0 {
+		return nil, nil
+	}
+	return chooseRandomChannelByWeight(channels), nil
+}
+
+func getChannelsByAbilityQuery(group string, model string, retry int) ([]*Channel, error) {
 	var abilities []Ability
 
-	var err error = nil
 	channelQuery, err := getChannelQuery(group, model, retry)
 	if err != nil {
 		return nil, err
@@ -136,28 +147,50 @@ func GetChannel(group string, model string, retry int) (*Channel, error) {
 	if err != nil {
 		return nil, err
 	}
-	channel := Channel{}
-	if len(abilities) > 0 {
-		// Randomly choose one
-		weightSum := uint(0)
-		for _, ability_ := range abilities {
-			weightSum += ability_.Weight + 10
-		}
-		// Randomly choose one
-		weight := common.GetRandomInt(int(weightSum))
-		for _, ability_ := range abilities {
-			weight -= int(ability_.Weight) + 10
-			//log.Printf("weight: %d, ability weight: %d", weight, *ability_.Weight)
-			if weight <= 0 {
-				channel.Id = ability_.ChannelId
-				break
-			}
-		}
-	} else {
+	if len(abilities) == 0 {
 		return nil, nil
 	}
-	err = DB.First(&channel, "id = ?", channel.Id).Error
-	return &channel, err
+	channelIDs := make([]int, 0, len(abilities))
+	for _, ability := range abilities {
+		channelIDs = append(channelIDs, ability.ChannelId)
+	}
+	channels, err := GetChannelsByIds(channelIDs)
+	if err != nil {
+		return nil, err
+	}
+	channelByID := make(map[int]*Channel, len(channels))
+	for _, channel := range channels {
+		if channel == nil {
+			continue
+		}
+		channelByID[channel.Id] = channel
+	}
+	result := make([]*Channel, 0, len(abilities))
+	for _, ability := range abilities {
+		channel, ok := channelByID[ability.ChannelId]
+		if !ok {
+			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", ability.ChannelId)
+		}
+		result = append(result, channel)
+	}
+	return result, nil
+}
+
+func getSatisfiedChannelsFromDB(group string, model string, retry int) ([]*Channel, error) {
+	modelsToTry := []string{model}
+	if normalized := ratio_setting.FormatMatchingModelName(model); normalized != "" && normalized != model {
+		modelsToTry = append(modelsToTry, normalized)
+	}
+	for _, candidateModel := range modelsToTry {
+		channels, err := getChannelsByAbilityQuery(group, candidateModel, retry)
+		if err != nil {
+			return nil, err
+		}
+		if len(channels) > 0 {
+			return channels, nil
+		}
+	}
+	return nil, nil
 }
 
 func (channel *Channel) AddAbilities(tx *gorm.DB) error {

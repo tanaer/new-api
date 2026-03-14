@@ -42,6 +42,8 @@ func TestMain(m *testing.M) {
 		&model.Token{},
 		&model.Log{},
 		&model.Channel{},
+		&model.Supplier{},
+		&model.SupplierGroup{},
 		&model.UserSubscription{},
 	); err != nil {
 		panic("failed to migrate: " + err.Error())
@@ -62,6 +64,8 @@ func truncate(t *testing.T) {
 		model.DB.Exec("DELETE FROM tokens")
 		model.DB.Exec("DELETE FROM logs")
 		model.DB.Exec("DELETE FROM channels")
+		model.DB.Exec("DELETE FROM supplier_groups")
+		model.DB.Exec("DELETE FROM suppliers")
 		model.DB.Exec("DELETE FROM user_subscriptions")
 	})
 }
